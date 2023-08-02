@@ -114,8 +114,11 @@ pub mod cpu {
                         let addr_dma = (val as u16) << 8;
                         let offset: usize = (addr_dma & 0x1f00).into();
                         let src = match addr_dma >> 13 {
-                            0 => &self.ram[offset..256],
-                            3 => &self.sram[offset..256],
+                            0 => {
+                                let mirror = offset & 0x7ff;
+                                &self.ram[mirror..mirror + 256]
+                            }
+                            3 => &self.sram[offset..offset + 256],
                             4 | 5 | 6 | 7 => &self.prg_rom[j - 4][offset..256],
                             1 | 2 => {
                                 unimplemented!("Can't be operating by DMA.");
@@ -143,10 +146,10 @@ pub mod cpu {
         }
         pub fn push(&mut self, sp_piont: &mut u8, data: u8) {
             self.ram[0x100 + *sp_piont as usize] = data;
-            *sp_piont -= 1;
+            *sp_piont = (*sp_piont).wrapping_sub(1);
         }
         pub fn pop(&self, sp_piont: &mut u8) -> u8 {
-            *sp_piont += 1;
+            *sp_piont = (*sp_piont).wrapping_add(1);
             self.ram[0x100 + *sp_piont as usize]
         }
     }
@@ -1383,28 +1386,28 @@ pub mod cpu {
         let machine_code: u8;
 
         machine_code = mem.read_memeory(cpu_reg.pc);
-        print!(
-            "code addr {:#x}, machine_code {:#x}, ",
-            cpu_reg.pc, machine_code
-        );
+        // print!(
+        //     "code addr {:#x}, machine_code {:#x}, ",
+        //     cpu_reg.pc, machine_code
+        // );
         cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
 
         let instru_addring = &ISTRU_OP_CODE[machine_code as usize];
         *cycles = (*cycles).wrapping_add(instru_addring.instru_base_cycle as u32);
 
         let op_addr = instru_addring.addring_mode.addressing(cpu_reg, mem, cycles);
-        print!(
-            "asm instruction {}, operation addr {:#x}, ",
-            instru_addring.instru_name, op_addr
-        );
+        // print!(
+        //     "asm instruction {}, operation addr {:#x}, ",
+        //     instru_addring.instru_name, op_addr
+        // );
 
         instru_addring.instru.exec(cpu_reg, mem, op_addr, cycles);
 
-        println!(
-            "a {:#x}, x {:#x}, y {:#x}, p {:#x}, sp {:#x}, cycles {}",
-            cpu_reg.a, cpu_reg.x, cpu_reg.y, cpu_reg.p.0, cpu_reg.sp, cycles
-        );
-        println!("{:#?}", instru_addring);
+        // println!(
+        //     "a {:#x}, x {:#x}, y {:#x}, p {:#x}, sp {:#x}, cycles {}",
+        //     cpu_reg.a, cpu_reg.x, cpu_reg.y, cpu_reg.p.0, cpu_reg.sp, cycles
+        // );
+        // println!("{:#?}", instru_addring);
     }
 }
 

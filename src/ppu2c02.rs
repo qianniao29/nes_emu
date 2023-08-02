@@ -141,7 +141,7 @@ pub mod ppu {
         pub struct CtrlReg(u8);
         impl Debug;
         u8;
-        pub nn, set_nn: 0, 1; //nametable select, current nametable
+        pub nn, set_nn: 1, 0; //nametable select, current nametable
         pub i, set_i: 2; //increment mode
         pub s, set_s: 3; //sprite tile select
         pub b, set_b: 4; //background tile select
@@ -209,7 +209,6 @@ pub mod ppu {
         pub struct StatusReg(u8);
         impl Debug;
         u8;
-        _rsd, _: 0,4; //reserved
         o, _: 5; //sprite overflow
         s, _: 6; //sprite 0 hit
         pub v, set_v: 7; //vblank
@@ -324,8 +323,7 @@ pub mod ppu {
         pub struct SpriteAttribute(u8);
         impl Debug;
         u8;
-        pub h2bit, _: 0,1; // 调色板高两位 (类似于属性表)
-        rsvd, _: 2,4;
+        pub h2bit, _: 1,0; // 调色板高两位 (类似于属性表)
         pub p, _: 5; // 优先级 (0-在背景前 1-在背景后)
         pub h, _: 6; // 1-水平翻转
         pub v, _: 7; // 1-垂直翻转
@@ -394,7 +392,7 @@ pub mod ppu {
         color_indx: &mut [Vec<u8>; 8],
     ) -> (u16, u16) {
         let sprite =
-            Sprite::new(&ppu_mem.oam[sprite_id as usize * 16..sprite_id as usize * 16 + 4]);
+            Sprite::new(&ppu_mem.oam[sprite_id as usize * 4..sprite_id as usize * 4 + 4]);
         let h2bit = sprite.attr.h2bit() << 2;
         let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
         let mut offset0 = sprite.tile_indx as u16 + ind;

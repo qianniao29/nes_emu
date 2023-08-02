@@ -36,11 +36,15 @@ fn main() -> Result<(), error::CustomError> {
 
     let (head, prgrom_buf, pattern_buff1k) = rom::load_rom(file_name)?;
     let mut mem = cpu::MemMap::new();
+    let mut offset = 0;
+    if head.prgrom_size_16k > 1 {
+        offset = 0x4000;
+    }
     mem.prg_rom = [
         &prgrom_buf[0x0..0x2000],
         &prgrom_buf[0x2000..0x4000],
-        &prgrom_buf[0x00..0x2000],
-        &prgrom_buf[0x2000..0x4000],
+        &prgrom_buf[offset + 0x00..offset + 0x2000],
+        &prgrom_buf[offset + 0x2000..offset + 0x4000],
     ];
 
     for i in 0..8 {
@@ -84,15 +88,15 @@ fn main() -> Result<(), error::CustomError> {
             }
             j += 8;
         }
-        // for id in (0..64).rev() {
-        //     let (x, y) = ppu::render_sprite(
-        //         id,
-        //         &mem.ppu_reg,
-        //         &mut mem.ppu_mem,
-        //         &mut disp.tile_color_indx,
-        //     );
-        //     disp.draw_tile(x, y);
-        // }
+        for id in (0..64).rev() {
+            let (x, y) = ppu::render_sprite(
+                id,
+                &mem.ppu_reg,
+                &mut mem.ppu_mem,
+                &mut disp.tile_color_indx,
+            );
+            disp.draw_tile(x, y);
+        }
         disp.display_present();
 
         if input.get_key(&mut mem.key) == usize::MAX {
