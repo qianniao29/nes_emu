@@ -60,13 +60,15 @@ pub mod ppu {
 
                 bank.borrow_mut()[j] = data;
             } else {
-                if addr_map & 0x3 != 0 {
-                    let palet_addr: usize = (addr_map & 0x1f).into();
+                let palet_addr: usize = (addr_map & 0x1f).into();
+                if palet_addr & 0x3 != 0 {
                     self.palette_indx_tbl[palet_addr] = data;
                 } else {
-                    let palet_addr: usize = (addr_map & 0x0f).into();
-                    self.palette_indx_tbl[palet_addr] = data;
-                    self.palette_indx_tbl[palet_addr | 0x10] = data;
+                    if palet_addr & 0x10 == 0 {
+                        self.palette_indx_tbl[palet_addr] = data;
+                    } else {
+                        self.palette_indx_tbl[palet_addr] = 64;
+                    }
                 }
             }
         }
@@ -391,17 +393,19 @@ pub mod ppu {
         ppu_mem: &mut MemMap,
         color_indx: &mut [Vec<u8>; 8],
     ) -> (u16, u16) {
-        let sprite =
-            Sprite::new(&ppu_mem.oam[sprite_id as usize * 4..sprite_id as usize * 4 + 4]);
+        let sprite = Sprite::new(&ppu_mem.oam[sprite_id as usize * 4..sprite_id as usize * 4 + 4]);
+        if sprite.pos_y >= 0xef {
+            return (sprite.pos_x as u16, sprite.pos_y as u16);
+        }
         let h2bit = sprite.attr.h2bit() << 2;
         let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
         let mut offset0 = sprite.tile_indx as u16 + ind;
         let mut offset1 = sprite.tile_indx as u16 + 8 + ind;
 
         let y_range = if sprite.attr.v() {
-            (0..8).map(|n| n).collect::<Vec<_>>()
-        } else {
             (0..8).rev().map(|n| n).collect::<Vec<_>>()
+        } else {
+            (0..8).map(|n| n).collect::<Vec<_>>()
         };
         let x_range = if sprite.attr.h() {
             (0..8).map(|n| n).collect::<Vec<_>>()

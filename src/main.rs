@@ -64,13 +64,13 @@ fn main() -> Result<(), error::CustomError> {
     let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
 
     'running: loop {
-        for _n in 0..10000 {
+        for _n in 0..4000 {
             cpu::execute_one_instruction(&mut cpu_reg, &mut mem, &mut cycles);
         }
         disp::vblank(&mut cpu_reg, &mut mem);
 
-        //genert platette data
-        disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl);
+        //genert bg platette data
+        disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[0..16]);
         let mut i;
         let mut j = 0;
         while j < 240 {
@@ -88,6 +88,8 @@ fn main() -> Result<(), error::CustomError> {
             }
             j += 8;
         }
+        //genert sprite platette data
+        disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
         for id in (0..64).rev() {
             let (x, y) = ppu::render_sprite(
                 id,
@@ -95,6 +97,7 @@ fn main() -> Result<(), error::CustomError> {
                 &mut mem.ppu_mem,
                 &mut disp.tile_color_indx,
             );
+            if y >= 0xef {continue;}
             disp.draw_tile(x, y);
         }
         disp.display_present();
