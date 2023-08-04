@@ -5,8 +5,7 @@ pub mod disp_sdl2 {
     use sdl2::keyboard::Keycode;
     use sdl2::pixels::{Color, PixelFormatEnum};
     use sdl2::rect::{Point, Rect};
-    #[cfg(feature = "unsafe_textures")]
-    use sdl2::render::Texture;
+    use sdl2::render::{Texture,Canvas};
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -14,8 +13,8 @@ pub mod disp_sdl2 {
 
     pub struct DispSDL2 {
         pub sdl_context: sdl2::Sdl,
-        pub canvas: sdl2::render::Canvas<sdl2::video::Window>,
-        pub texture: sdl2::render::Texture,
+        pub canvas: Canvas<sdl2::video::Window>,
+        pub texture: Texture,
     }
 
     impl DispSDL2 {
@@ -34,7 +33,7 @@ pub mod disp_sdl2 {
             let texture_creator = canvas.texture_creator();
 
             let texture = texture_creator
-                .create_texture_streaming(PixelFormatEnum::ARGB32, 8, 8)
+                .create_texture_streaming(PixelFormatEnum::ARGB8888, 8, 8)
                 .unwrap();
 
             let palette_data: [[u8; 4]; 16] = [[0; 4]; 16];
@@ -43,7 +42,7 @@ pub mod disp_sdl2 {
                 v.resize(16, 0);
             }
 
-            canvas.set_draw_color(Color::RGB(10, 10, 10));
+            canvas.set_draw_color(Color::RGB(0, 0, 0));
             canvas.clear();
             canvas.present();
 
@@ -70,25 +69,34 @@ pub mod disp_sdl2 {
             self.palette_data[4 * 3] = self.palette_data[0];
         }
         fn draw_tile(&mut self, x: u16, y: u16) {
-            self.dev
-                .texture
-                .with_lock(None, |buffer: &mut [u8], pitch: usize| {
-                    for j in 0..8 {
-                        for i in 0..8 {
-                            let offset = j * pitch + i * 4;
-                            let color_indx = self.tile_color_indx[j][i] as usize;
-                            buffer[offset] = self.palette_data[color_indx][0];
-                            buffer[offset + 1] = self.palette_data[color_indx][1];
-                            buffer[offset + 2] = self.palette_data[color_indx][2];
-                            buffer[offset + 3] = self.palette_data[color_indx][3];
-                        }
-                    }
-                })
-                .unwrap();
-            self.dev
-                .canvas
-                .copy(&self.dev.texture, None, Rect::new(x.into(), y.into(), 8, 8))
-                .unwrap();
+            for j in 0..8 {
+                for i in 0..8 {
+                    let color_indx = self.tile_color_indx[j][i] as usize;
+                    if color_indx==64{continue;}
+                    self.dev.canvas.set_draw_color(Color::RGBA(self.palette_data[color_indx][1],
+                        self.palette_data[color_indx][2],self.palette_data[color_indx][3],self.palette_data[color_indx][0]));
+                    self.dev.canvas.draw_point((x as i32 + i as i32, y as i32 + j as i32)).unwrap();
+                }
+            }
+            // self.dev
+            //     .texture
+            //     .with_lock(None, |buffer: &mut [u8], pitch: usize| {
+            //         for j in 0..8 {
+            //             for i in 0..8 {
+            //                 let offset = j * pitch + i * 4;
+            //                 let color_indx = self.tile_color_indx[j][i] as usize;
+            //                 buffer[offset] = self.palette_data[color_indx][0];
+            //                 buffer[offset + 1] = self.palette_data[color_indx][1];
+            //                 buffer[offset + 2] = self.palette_data[color_indx][2];
+            //                 buffer[offset + 3] = self.palette_data[color_indx][3];
+            //             }
+            //         }
+            //     })
+            //     .unwrap();
+            // self.dev
+            //     .canvas
+            //     .copy(&self.dev.texture, None, Rect::new(x.into(), y.into(), 8, 8))
+            //     .unwrap();
         }
         fn read_tile(&mut self, x: u16, y: u16) {
             let color = self
@@ -120,6 +128,6 @@ pub mod disp_sdl2 {
         [0xFF, 0xE0, 0xB0, 0xFF], [0xFF, 0xFF, 0xB8, 0xE8], [0xFF, 0xFF, 0xC8, 0xB8], [0xFF, 0xFF, 0xD8, 0xA0],
         [0xFF, 0xFF, 0xF0, 0x90], [0xFF, 0xC8, 0xF0, 0x80], [0xFF, 0xA0, 0xF0, 0xA0], [0xFF, 0xA0, 0xFF, 0xC8],
         [0xFF, 0xA0, 0xFF, 0xF0], [0xFF, 0xA0, 0xA0, 0xA0], [0xFF, 0x00, 0x00, 0x00], [0xFF, 0x00, 0x00, 0x00],
-        [0x00, 0x00, 0x00, 0x00],
+        [0x00, 0x00, 0x00, 0x00]
     ];
 }
