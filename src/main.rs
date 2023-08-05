@@ -98,7 +98,7 @@ fn main() -> Result<(), error::CustomError> {
                 &mut disp.tile_color_indx,
             );
             if y >= 0xef {continue;}
-            disp.draw_tile(x, y);
+            disp.draw_sprite(x, y);
         }
         disp.display_present();
 

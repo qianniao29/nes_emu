@@ -33,7 +33,7 @@ pub mod disp_sdl2 {
             let texture_creator = canvas.texture_creator();
 
             let texture = texture_creator
-                .create_texture_streaming(PixelFormatEnum::ARGB8888, 8, 8)
+                .create_texture_streaming(PixelFormatEnum::ARGB32, 8, 8)
                 .unwrap();
 
             let palette_data: [[u8; 4]; 16] = [[0; 4]; 16];
@@ -64,46 +64,36 @@ pub mod disp_sdl2 {
             for i in 0..16 {
                 self.palette_data[i] = PLALETTE_STD_DATA[palette_indx_tbl[i] as usize];
             }
-            self.palette_data[4 * 1] = self.palette_data[0];
-            self.palette_data[4 * 2] = self.palette_data[0];
-            self.palette_data[4 * 3] = self.palette_data[0];
         }
         fn draw_tile(&mut self, x: u16, y: u16) {
+            self.dev
+                .texture
+                .with_lock(None, |buffer: &mut [u8], pitch: usize| {
+                    for j in 0..8 {
+                        for i in 0..8 {
+                            let offset = j * pitch + i * 4;
+                            let color_indx = self.tile_color_indx[j][i] as usize;
+                            let s = &mut buffer[offset..offset + 4];
+                            s.copy_from_slice(&self.palette_data[color_indx][..]);
+                        }
+                    }
+                })
+                .unwrap();
+            self.dev
+                .canvas
+                .copy(&self.dev.texture, None, Rect::new(x.into(), y.into(), 8, 8))
+                .unwrap();
+        }
+        fn draw_sprite(&mut self, x: u16, y: u16) {
             for j in 0..8 {
                 for i in 0..8 {
                     let color_indx = self.tile_color_indx[j][i] as usize;
-                    if color_indx==64{continue;}
+                    if color_indx & 3 == 0 {continue;} // 透明色精灵，保持背景色不变
                     self.dev.canvas.set_draw_color(Color::RGBA(self.palette_data[color_indx][1],
                         self.palette_data[color_indx][2],self.palette_data[color_indx][3],self.palette_data[color_indx][0]));
                     self.dev.canvas.draw_point((x as i32 + i as i32, y as i32 + j as i32)).unwrap();
                 }
             }
-            // self.dev
-            //     .texture
-            //     .with_lock(None, |buffer: &mut [u8], pitch: usize| {
-            //         for j in 0..8 {
-            //             for i in 0..8 {
-            //                 let offset = j * pitch + i * 4;
-            //                 let color_indx = self.tile_color_indx[j][i] as usize;
-            //                 buffer[offset] = self.palette_data[color_indx][0];
-            //                 buffer[offset + 1] = self.palette_data[color_indx][1];
-            //                 buffer[offset + 2] = self.palette_data[color_indx][2];
-            //                 buffer[offset + 3] = self.palette_data[color_indx][3];
-            //             }
-            //         }
-            //     })
-            //     .unwrap();
-            // self.dev
-            //     .canvas
-            //     .copy(&self.dev.texture, None, Rect::new(x.into(), y.into(), 8, 8))
-            //     .unwrap();
-        }
-        fn read_tile(&mut self, x: u16, y: u16) {
-            let color = self
-                .dev
-                .canvas
-                .read_pixels(Rect::new(x.into(), y.into(), 8, 8), PixelFormatEnum::RGB24)
-                .unwrap();
         }
         fn display_present(&mut self) {
             self.dev.canvas.present();
@@ -111,7 +101,7 @@ pub mod disp_sdl2 {
     }
 
     #[rustfmt::skip]
-    const PLALETTE_STD_DATA: [[u8; 4]; 65] = [
+    const PLALETTE_STD_DATA: [[u8; 4]; 64] = [
         [0xFF, 0x7F, 0x7F, 0x7F], [0xFF, 0x20, 0x00, 0xB0], [0xFF, 0x28, 0x00, 0xB8], [0xFF, 0x60, 0x10, 0xA0],
         [0xFF, 0x98, 0x20, 0x78], [0xFF, 0xB0, 0x10, 0x30], [0xFF, 0xA0, 0x30, 0x00], [0xFF, 0x78, 0x40, 0x00],
         [0xFF, 0x48, 0x58, 0x00], [0xFF, 0x38, 0x68, 0x00], [0xFF, 0x38, 0x6C, 0x00], [0xFF, 0x30, 0x60, 0x40],
@@ -128,6 +118,5 @@ pub mod disp_sdl2 {
         [0xFF, 0xE0, 0xB0, 0xFF], [0xFF, 0xFF, 0xB8, 0xE8], [0xFF, 0xFF, 0xC8, 0xB8], [0xFF, 0xFF, 0xD8, 0xA0],
         [0xFF, 0xFF, 0xF0, 0x90], [0xFF, 0xC8, 0xF0, 0x80], [0xFF, 0xA0, 0xF0, 0xA0], [0xFF, 0xA0, 0xFF, 0xC8],
         [0xFF, 0xA0, 0xFF, 0xF0], [0xFF, 0xA0, 0xA0, 0xA0], [0xFF, 0x00, 0x00, 0x00], [0xFF, 0x00, 0x00, 0x00],
-        [0x00, 0x00, 0x00, 0x00]
     ];
 }

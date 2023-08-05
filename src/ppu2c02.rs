@@ -63,11 +63,10 @@ pub mod ppu {
                 let palet_addr: usize = (addr_map & 0x1f).into();
                 if palet_addr & 0x3 != 0 {
                     self.palette_indx_tbl[palet_addr] = data;
-                } else {
-                    if palet_addr & 0x10 == 0 {
-                        self.palette_indx_tbl[palet_addr] = data;
-                    } else {
-                        self.palette_indx_tbl[palet_addr] = 64;
+                } else if palet_addr == 0 { 
+                    // 全局背景色
+                    for n in [0,4,8,12] {
+                        self.palette_indx_tbl[n] = data;
                     }
                 }
             }
@@ -362,7 +361,7 @@ pub mod ppu {
         pattern <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
         let ind = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
         let mut offset0 = pattern + ind;
-        let mut offset1 = pattern + 8 + ind;
+        let mut offset1 = offset0 + 8;
 
         // 计算所在属性表
         // 1 个字节控制 4*4=16 个 tile，2bit 控制 2*2=4 个 tile。1 个字节控制 32*32 像素
@@ -399,8 +398,8 @@ pub mod ppu {
         }
         let h2bit = sprite.attr.h2bit() << 2;
         let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
-        let mut offset0 = sprite.tile_indx as u16 + ind;
-        let mut offset1 = sprite.tile_indx as u16 + 8 + ind;
+        let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
+        let mut offset1 = offset0 + 8;
 
         let y_range = if sprite.attr.v() {
             (0..8).rev().map(|n| n).collect::<Vec<_>>()
@@ -422,8 +421,7 @@ pub mod ppu {
                 //颜色索引高 2bit
                 color_indx[y][n] = h2bit;
                 //颜色索引低 2bit
-                color_indx[y][n] |= (name0 >> j) & 0x1;
-                color_indx[y][n] |= ((name1 >> j) & 0x1) << 1;
+                color_indx[y][n] |= ((name0 >> j) & 0x1) | (((name1 >> j) & 0x1) << 1);
                 n += 1;
             }
             offset0 += 1;
