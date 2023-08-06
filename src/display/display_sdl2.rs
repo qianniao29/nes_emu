@@ -5,7 +5,7 @@ pub mod disp_sdl2 {
     use sdl2::keyboard::Keycode;
     use sdl2::pixels::{Color, PixelFormatEnum};
     use sdl2::rect::{Point, Rect};
-    use sdl2::render::{Texture,Canvas};
+    use sdl2::render::{Canvas, Texture};
 
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -88,10 +88,19 @@ pub mod disp_sdl2 {
             for j in 0..8 {
                 for i in 0..8 {
                     let color_indx = self.tile_color_indx[j][i] as usize;
-                    if color_indx & 3 == 0 {continue;} // 透明色精灵，保持背景色不变
-                    self.dev.canvas.set_draw_color(Color::RGBA(self.palette_data[color_indx][1],
-                        self.palette_data[color_indx][2],self.palette_data[color_indx][3],self.palette_data[color_indx][0]));
-                    self.dev.canvas.draw_point((x as i32 + i as i32, y as i32 + j as i32)).unwrap();
+                    if color_indx & 3 == 0 {
+                        continue;
+                    } // 透明色精灵，保持背景色不变
+                    self.dev.canvas.set_draw_color(Color::RGBA(
+                        self.palette_data[color_indx][1],
+                        self.palette_data[color_indx][2],
+                        self.palette_data[color_indx][3],
+                        self.palette_data[color_indx][0],
+                    ));
+                    self.dev
+                        .canvas
+                        .draw_point((x as i32 + i as i32, y as i32 + j as i32))
+                        .unwrap();
                 }
             }
         }

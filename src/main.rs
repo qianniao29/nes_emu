@@ -97,7 +97,9 @@ fn main() -> Result<(), error::CustomError> {
                 &mut mem.ppu_mem,
                 &mut disp.tile_color_indx,
             );
-            if y >= 0xef {continue;}
+            if y >= 0xef {
+                continue;
+            }
             disp.draw_sprite(x, y);
         }
         disp.display_present();

@@ -63,9 +63,9 @@ pub mod ppu {
                 let palet_addr: usize = (addr_map & 0x1f).into();
                 if palet_addr & 0x3 != 0 {
                     self.palette_indx_tbl[palet_addr] = data;
-                } else if palet_addr == 0 { 
+                } else if palet_addr == 0 {
                     // 全局背景色
-                    for n in [0,4,8,12] {
+                    for n in [0, 4, 8, 12] {
                         self.palette_indx_tbl[n] = data;
                     }
                 }
@@ -267,7 +267,9 @@ pub mod ppu {
                 0x4 => mem.oam[self.oam_addr as usize],
                 0x7 => {
                     let val = mem.read(self.ppu_addr);
-                    self.ppu_addr += if self.ctrl.i() { 32 } else { 1 };
+                    self.ppu_addr = self
+                        .ppu_addr
+                        .wrapping_add(if self.ctrl.i() { 32 } else { 1 });
                     val
                 }
                 _ => unreachable!("Out of memory range!"),
@@ -278,8 +280,8 @@ pub mod ppu {
             match addr & 0x0007 {
                 0x0 => {
                     self.ctrl.0 = data;
-                    self.ppu_addr_tmp =
-                        (self.ppu_addr_tmp & 0xf3ff) | (((data as u16) & 0x03) << 10);
+                    // self.ppu_addr_tmp =
+                    //     (self.ppu_addr_tmp & 0xf3ff) | (((data as u16) & 0x03) << 10);
                 }
                 0x1 => {
                     self.status.0 = data;
@@ -290,7 +292,7 @@ pub mod ppu {
                 }
                 0x4 => {
                     mem.oam[self.oam_addr as usize] = data;
-                    self.oam_addr += 1;
+                    self.oam_addr = self.oam_addr.wrapping_add(1);
                 }
                 0x5 => {
                     if self.dw_cnt == 0 {
@@ -313,7 +315,9 @@ pub mod ppu {
                 }
                 0x7 => {
                     mem.write(self.ppu_addr, data);
-                    self.ppu_addr += if self.ctrl.i() { 32 } else { 1 };
+                    self.ppu_addr = self
+                        .ppu_addr
+                        .wrapping_add(if self.ctrl.i() { 32 } else { 1 });
                 }
                 _ => unreachable!("Out of memory range!"),
             }
