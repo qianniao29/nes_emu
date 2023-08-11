@@ -33,14 +33,11 @@ pub mod disp_sdl2 {
             let texture_creator = canvas.texture_creator();
 
             let texture = texture_creator
-                .create_texture_streaming(PixelFormatEnum::ARGB32, 8, 8)
+                .create_texture_streaming(PixelFormatEnum::ARGB32, 256, 1)
                 .unwrap();
 
             let palette_data: [[u8; 4]; 16] = [[0; 4]; 16];
-            let mut tile_color_indx: [Vec<u8>; 8] = Default::default();
-            for v in &mut tile_color_indx {
-                v.resize(16, 0);
-            }
+            let scanline_color_indx= [0; 256];
 
             canvas.set_draw_color(Color::RGB(0, 0, 0));
             canvas.clear();
@@ -53,7 +50,7 @@ pub mod disp_sdl2 {
                     texture,
                 },
                 palette_data,
-                tile_color_indx,
+                scanline_color_indx,
             }
         }
     }
@@ -70,11 +67,12 @@ pub mod disp_sdl2 {
                 .texture
                 .with_lock(None, |buffer: &mut [u8], pitch: usize| {
                     for j in 0..8 {
+                        let tile_color_indx = &self.scanline_color_indx[(j * 8)..(j * 8 + 8)];
                         for i in 0..8 {
                             let offset = j * pitch + i * 4;
-                            let color_indx = self.tile_color_indx[j][i] as usize;
-                            let s = &mut buffer[offset..offset + 4];
-                            s.copy_from_slice(&self.palette_data[color_indx][..]);
+                            let color_indx = tile_color_indx[i] as usize;
+                            buffer[offset..offset + 4]
+                                .clone_from_slice(&self.palette_data[color_indx][..]);
                         }
                     }
                 })
@@ -84,10 +82,28 @@ pub mod disp_sdl2 {
                 .copy(&self.dev.texture, None, Rect::new(x.into(), y.into(), 8, 8))
                 .unwrap();
         }
+        fn draw_scanline(&mut self, y: u16) {
+            self.dev
+                .texture
+                .with_lock(None, |buffer: &mut [u8], _| {
+                    for i in 0..256 {
+                        let offset = i * 4;
+                        let color_indx = self.scanline_color_indx[i] as usize;
+                        buffer[offset..offset + 4]
+                            .clone_from_slice(&self.palette_data[color_indx][..]);
+                    }
+                })
+                .unwrap();
+            self.dev
+                .canvas
+                .copy(&self.dev.texture, None, Rect::new(0, y.into(), 256, 1))
+                .unwrap();
+        }
         fn draw_sprite(&mut self, x: u16, y: u16) {
             for j in 0..8 {
+                let tile_color_indx = &self.scanline_color_indx[(j * 8)..(j * 8 + 8)];
                 for i in 0..8 {
-                    let color_indx = self.tile_color_indx[j][i] as usize;
+                    let color_indx = tile_color_indx[i] as usize;
                     if color_indx & 3 == 0 {
                         continue;
                     } // 透明色精灵，保持背景色不变

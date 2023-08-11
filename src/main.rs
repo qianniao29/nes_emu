@@ -27,6 +27,7 @@ use rom_fs::rom;
 
 fn reset(cpu_reg: &mut cpu::Register, mem: &mut cpu::MemMap) {
     cpu_reg.reset(mem);
+    cpu::cpu_cycles_reset();
 }
 
 fn main() -> Result<(), error::CustomError> {
@@ -55,7 +56,6 @@ fn main() -> Result<(), error::CustomError> {
         .mapping_name_table(head.flag6.four_screen(), head.flag6.mirror_flag());
 
     let mut cpu_reg = cpu::Register::new();
-    let mut cycles: u32 = 0;
     reset(&mut cpu_reg, &mut mem);
 
     /*-----------------------display init-----------------------------*/
@@ -65,38 +65,22 @@ fn main() -> Result<(), error::CustomError> {
 
     'running: loop {
         for _n in 0..4000 {
-            cpu::execute_one_instruction(&mut cpu_reg, &mut mem, &mut cycles);
+            cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
         }
         disp::vblank(&mut cpu_reg, &mut mem);
-
+        disp.scanline_color_indx = [0;256];
         //genert bg platette data
         disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[0..16]);
-        let mut i;
-        let mut j = 0;
-        while j < 240 {
-            i = 0;
-            while i < 256 {
-                ppu::render_tile(
-                    i,
-                    j,
-                    &mem.ppu_reg,
-                    &mut mem.ppu_mem,
-                    &mut disp.tile_color_indx,
-                );
-                disp.draw_tile(i, j);
-                i += 8;
-            }
-            j += 8;
+        for j in 0..240 {
+            // if mem.ppu_reg.mask.bg() == false {continue;}
+            ppu::render_scanline(&mem.ppu_reg, &mut mem.ppu_mem, &mut disp.scanline_color_indx);
+            disp.draw_scanline(j);
         }
         //genert sprite platette data
         disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
         for id in (0..64).rev() {
-            let (x, y) = ppu::render_sprite(
-                id,
-                &mem.ppu_reg,
-                &mut mem.ppu_mem,
-                &mut disp.tile_color_indx,
-            );
+            let (x, y) =
+                ppu::render_sprite(id, &mem.ppu_reg, &mut mem.ppu_mem, &mut disp.scanline_color_indx);
             if y >= 0xef {
                 continue;
             }

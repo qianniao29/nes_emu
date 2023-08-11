@@ -45,7 +45,7 @@ pub mod ppu {
                 val
             } else {
                 let palet_addr: usize = ((addr_map - 0x3f00) & 0x1f).into();
-                // self.pseudo_cache = self.palette_indx_tbl[palet_addr];
+                self.pseudo_cache = self.palette_indx_tbl[palet_addr];
                 self.palette_indx_tbl[palet_addr]
             }
         }
@@ -170,14 +170,14 @@ pub mod ppu {
         pub struct MaskReg(u8);
         impl Debug;
         u8;
-        _, set_gs: 0; //greyscale
-        _, set_bm: 1; //background left column enable
-        _, set_sm: 2; //sprite left column enable
-        _, set_bg: 3; //background enable
-        _, set_s: 4; //sprite enable
-        _, set_r: 5; //Emphasize red
-        _, set_g: 6; //Emphasize green
-        _, set_b: 7; //Emphasize blue
+        pub gs, set_gs: 0; //greyscale
+        pub bm, set_bm: 1; //background left column enable
+        pub sm, set_sm: 2; //sprite left column enable
+        pub bg, set_bg: 3; //background enable
+        pub s, set_s: 4; //sprite enable
+        pub r, set_r: 5; //Emphasize red
+        pub g, set_g: 6; //Emphasize green
+        pub b, set_b: 7; //Emphasize blue
     }
 
     /*
@@ -217,28 +217,37 @@ pub mod ppu {
 
     // PPU 寄存器地址空间在 CPU 的寻址范围内，实际是属于 CPU 操作
     /*
-    Common Name     Address  Bits
-        PPUCTRL 	$2000 	VPHB SINN
-        PPUMASK 	$2001 	BGRs bMmG
-        PPUSTATUS 	$2002 	VSO- ----
-        OAMADDR 	$2003 	aaaa aaaa
-        OAMDATA 	$2004 	dddd dddd
-        PPUSCROLL 	$2005 	xxxx xxxx
-        PPUADDR 	$2006 	aaaa aaaa
-        PPUDATA 	$2007 	dddd dddd
-        OAMDMA   	$4014 	aaaa aaaa
+    Common Name Address Bits 	    Notes
+    PPUCTRL 	$2000 	VPHB SINN 	NMI enable (V), PPU master/slave (P), sprite height (H),
+                                    background tile select (B), sprite tile select (S),
+                                    increment mode (I), nametable select (NN)
+    PPUMASK 	$2001 	BGRs bMmG 	color emphasis (BGR), sprite enable (s), background enable (b),
+                                    sprite left column enable (M), background left column enable (m), greyscale (G)
+    PPUSTATUS 	$2002 	VSO- ---- 	vblank (V), sprite 0 hit (S), sprite overflow (O);
+                                    read resets write pair for $2005/$2006
+    OAMADDR 	$2003 	aaaa aaaa 	OAM read/write address
+    OAMDATA 	$2004 	dddd dddd 	OAM data read/write
+    PPUSCROLL 	$2005 	xxxx xxxx 	fine scroll position (two writes: X scroll, Y scroll)
+    PPUADDR 	$2006 	aaaa aaaa 	PPU read/write address (two writes: most significant byte, least significant byte)
+    PPUDATA 	$2007 	dddd dddd 	PPU data read/write
+    OAMDMA  	$4014 	aaaa aaaa 	OAM DMA high address
      */
     pub struct Register {
         pub ctrl: CtrlReg,
         pub mask: MaskReg,
         pub status: StatusReg,
-        pub oam_addr: u8,    //OAM adress, write only
-        pub scroll: [u8; 2], //PPU scrolling position register, write twice: X scroll, Y scroll
+        pub oam_addr: u8,  //OAM adress, write only
         pub ppu_addr: u16, //PPU read/write address  two writes :most significant byte, least significant byte)
+        /* ppu_addr_tmp
+        yyy NN YYYYY XXXXX
+            ||| || ||||| +++++-- coarse X scroll
+            ||| || +++++-------- coarse Y scroll
+            ||| ++-------------- nametable select
+            +++----------------- fine Y scroll
+         */
         pub ppu_addr_tmp: u16,
-        pub dma_haddr: u8, //OAM DMA high address
-
-        dw_cnt: u8, // double write count
+        pub fine_x_scroll: u8,
+        second_write: bool, // double write count
     }
 
     impl Register {
@@ -248,11 +257,10 @@ pub mod ppu {
                 mask: MaskReg(0),
                 status: StatusReg(0),
                 oam_addr: 0,
-                scroll: [0; 2],
                 ppu_addr: 0,
                 ppu_addr_tmp: 0,
-                dma_haddr: 0,
-                dw_cnt: 0,
+                fine_x_scroll: 0,
+                second_write: false,
             }
         }
 
@@ -262,6 +270,7 @@ pub mod ppu {
                 0x2 => {
                     let val = self.status.0;
                     self.status.set_v(false);
+                    self.second_write = false;
                     val
                 }
                 0x4 => mem.oam[self.oam_addr as usize],
@@ -280,8 +289,8 @@ pub mod ppu {
             match addr & 0x0007 {
                 0x0 => {
                     self.ctrl.0 = data;
-                    // self.ppu_addr_tmp =
-                    //     (self.ppu_addr_tmp & 0xf3ff) | (((data as u16) & 0x03) << 10);
+                    self.ppu_addr_tmp =
+                        (self.ppu_addr_tmp & 0xf3ff) | (((data as u16) & 0x03) << 10);
                 }
                 0x1 => {
                     self.status.0 = data;
@@ -295,22 +304,42 @@ pub mod ppu {
                     self.oam_addr = self.oam_addr.wrapping_add(1);
                 }
                 0x5 => {
-                    if self.dw_cnt == 0 {
-                        self.scroll[0] = data;
-                        self.dw_cnt = 1;
+                    // according to https://www.nesdev.org/wiki/PPU_scrolling
+                    let val16 = data as u16;
+                    if self.second_write == false {
+                        // t: ........ ...HGFED = d: HGFED...
+                        // x:               CBA = d: .....CBA
+                        // w:                   = 1
+                        self.ppu_addr_tmp = (self.ppu_addr_tmp & 0xffe0) | (val16 >> 3);
+                        self.fine_x_scroll = data & 0x7;
+                        self.second_write = true;
                     } else {
-                        self.scroll[1] = data;
-                        self.dw_cnt = 0;
+                        // t: .CBA..HG FED..... = d: HGFEDCBA
+                        // w:                   = 0
+                        self.ppu_addr_tmp = (self.ppu_addr_tmp & 0x8c1f)
+                            | ((val16 & 0x7) << 12)
+                            | ((val16 & 0xf8) << 2);
+                        self.second_write = false;
                     }
                 }
                 0x6 => {
                     //first write high byte, then write low byte.
-                    if self.dw_cnt == 0 {
+                    if self.second_write == false {
+                        // t: .CDEFGH ........ <- d: ..CDEFGH
+                        //        <unused>     <- d: AB......
+                        // t: Z...... ........ <- 0 (bit Z is cleared)
+                        // w:                  <- 1
+                        self.ppu_addr_tmp =
+                            (self.ppu_addr_tmp & 0x80ff) | ((data as u16 & 0x3f) << 8);
                         self.ppu_addr = (data as u16) << 8;
-                        self.dw_cnt = 1;
+                        self.second_write = true;
                     } else {
-                        self.ppu_addr |= data as u16;
-                        self.dw_cnt = 0;
+                        // t: ....... ABCDEFGH <- d: ABCDEFGH
+                        // v: <...all bits...> <- t: <...all bits...>
+                        // w:                  <- 0
+                        self.ppu_addr_tmp = (self.ppu_addr_tmp & 0xff00) | data as u16;
+                        self.ppu_addr = self.ppu_addr_tmp;
+                        self.second_write = false;
                     }
                 }
                 0x7 => {
@@ -390,11 +419,69 @@ pub mod ppu {
         }
     }
 
+    pub fn render_scanline(ppu_reg: &Register, ppu_mem: &mut MemMap, color_indx: &mut [u8]) {
+        // if ppu_reg.mask.bg() == false {
+        //     //TODO: 放在函数外的循环前面？
+        //     return;
+        // }
+        let ind = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
+        /* ppu_addr_tmp
+            yyy NN YYYYY XXXXX
+            ||| || ||||| +++++-- coarse X scroll
+            ||| || +++++-------- coarse Y scroll
+            ||| ++-------------- nametable select
+            +++----------------- fine Y scroll
+        */
+        let tile_x = ppu_reg.ppu_addr_tmp & 0x1f;
+        let tile_y = ppu_reg.ppu_addr_tmp >> 5 & 0x1f;
+
+        let mut offset: [u16; 2] = [0; 2];
+        let name_tbl_base = (tile_y * 32) | 0x2000 | (ppu_reg.ppu_addr_tmp & 0xc00); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
+
+        for i in 0..16 {
+            let mut name_tbl_offset = name_tbl_base | ((tile_x + i) & 0x1f);
+            // read name table
+            ppu_mem.read(name_tbl_offset); // refresh cache
+            let mut pattern = ppu_mem.read(name_tbl_offset) as u16; //read again
+            pattern <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
+            offset[0] = pattern + ind;
+            name_tbl_offset = name_tbl_base | ((tile_x + i + 1) & 0x1f);
+            ppu_mem.read(name_tbl_offset); // refresh cache
+            pattern = ppu_mem.read(name_tbl_offset) as u16; //read again
+            pattern <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
+            offset[1] = pattern + ind;
+
+            /*
+            计算所在属性表
+            1 个字节控制 4*4=16 个 tile，2bit 控制 2*2=4 个 tile。1 个字节控制 32*32 像素
+            */
+            let attribute_id = (tile_x >> 2) + (tile_y >> 2) * 8;
+            let attr = ppu_mem.read(attribute_id + 960 + 0x2000);
+            let shift = ((tile_x & 0x2) + ((tile_y & 0x2) << 1)) as u8; //((pos_x&0x1f)>>4 + (pos_y&0x1f)>>4*2)*2;
+            let color_h2bit = ((attr >> shift) & 0x3) << 2;
+
+            for n in 0..2 {
+                ppu_mem.read(offset[n]);
+                let name0 = ppu_mem.read(offset[n]);
+                ppu_mem.read(offset[n] + 8);
+                let name1 = ppu_mem.read(offset[n] + 8);
+                for j in 0..8 {
+                    let inx = (i as usize) * 16 + n * 8 + j;
+                    //颜色索引高 2bit
+                    color_indx[inx] = color_h2bit;
+                    //颜色索引低 2bit
+                    color_indx[inx] |= (name0 >> (7 - j)) & 0x1;
+                    color_indx[inx] |= ((name1 >> (7 - j)) & 0x1) << 1;
+                }
+            }
+        }
+    }
+
     pub fn render_sprite(
         sprite_id: u8,
         ppu_reg: &Register,
         ppu_mem: &mut MemMap,
-        color_indx: &mut [Vec<u8>; 8],
+        color_indx: &mut [u8],
     ) -> (u16, u16) {
         let sprite = Sprite::new(&ppu_mem.oam[sprite_id as usize * 4..sprite_id as usize * 4 + 4]);
         if sprite.pos_y >= 0xef {
@@ -416,6 +503,7 @@ pub mod ppu {
             (0..8).rev().map(|n| n).collect::<Vec<_>>()
         };
         for y in y_range {
+            let line_color_indx = &mut color_indx[(y * 8)..(y * 8 + 8)];
             ppu_mem.read(offset0);
             let name0 = ppu_mem.read(offset0);
             ppu_mem.read(offset1);
@@ -423,9 +511,9 @@ pub mod ppu {
             let mut n = 0;
             for j in &x_range {
                 //颜色索引高 2bit
-                color_indx[y][n] = h2bit;
+                line_color_indx[n] = h2bit;
                 //颜色索引低 2bit
-                color_indx[y][n] |= ((name0 >> j) & 0x1) | (((name1 >> j) & 0x1) << 1);
+                line_color_indx[n] |= ((name0 >> j) & 0x1) | (((name1 >> j) & 0x1) << 1);
                 n += 1;
             }
             offset0 += 1;

@@ -6,12 +6,13 @@ pub mod disp {
     pub struct Display<T, M> {
         pub dev: T,
         pub palette_data: [M; 16],
-        pub tile_color_indx: [Vec<u8>; 8],
+        pub scanline_color_indx: [u8; 256],
     }
 
     pub trait DisplayFunc<T, M> {
         fn generate_palette_data(&mut self, palette_indx_tbl: &[u8]);
         fn draw_tile(&mut self, x: u16, y: u16);
+        fn draw_scanline(&mut self, y: u16,);
         fn draw_sprite(&mut self, x: u16, y: u16);
         fn display_present(&mut self);
     }

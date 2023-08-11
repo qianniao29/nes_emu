@@ -34,6 +34,24 @@ pub mod cpu {
     pub const KEY_LEFT: usize = 6;
     pub const KEY_RIGHT: usize = 7;
 
+    static mut CPU_CYCLES: u32 = 0;
+
+    pub fn cpu_cycles_reset() {
+        unsafe {
+            CPU_CYCLES = 0;
+        }
+    }
+
+    pub fn cpu_cycles_add(cnt: u32) {
+        unsafe {
+            CPU_CYCLES = CPU_CYCLES.wrapping_add(cnt);
+        }
+    }
+
+    pub fn get_cpu_cycles() -> u32 {
+        unsafe { CPU_CYCLES }
+    }
+
     pub struct MemMap<'a> {
         pub ram: [u8; 0x800],
         pub ppu_reg: ppu::Register,
@@ -125,7 +143,19 @@ pub mod cpu {
                             }
                             _ => unreachable!("Out of memory range!"),
                         };
-                        self.ppu_mem.oam.clone_from_slice(src);
+                        if self.ppu_reg.oam_addr == 0 {
+                            self.ppu_mem.oam.clone_from_slice(src);
+                        } else {
+                            let off = (255 - self.ppu_reg.oam_addr + 1) as usize;
+                            self.ppu_mem.oam[self.ppu_reg.oam_addr as usize..=255]
+                                .clone_from_slice(&src[..off]);
+                            self.ppu_mem.oam[..self.ppu_reg.oam_addr as usize]
+                                .clone_from_slice(&src[off..]);
+                        }
+                        cpu_cycles_add(513);
+                        if get_cpu_cycles() & 0x1 == 0x1 {
+                            cpu_cycles_add(1);
+                        }
                     } else if addr & 0x1f == 0x16 {
                         if val & 0x1 == 0 {
                             self.key_indx[0] = 0;
@@ -320,23 +350,8 @@ pub mod cpu {
         Unk,     //unknown
     }
 
-    // trait Addring {
-    //     fn addresing(&self, cpu_reg: &mut Register, mem: &memory::MemMap, cycles: &mut u32) -> u16;
-    // }
-
-    // impl Addring for AddressingMode {
-    //     fn addresing(&self, cpu_reg: &mut Register, mem: &memory::MemMap, cycles: &mut u32) -> u16 {
-    //         0u16
-    //     }
-    // }
-
     impl AddressingMode {
-        pub fn addressing(
-            &self,
-            cpu_reg: &mut Register,
-            mem: &mut MemMap,
-            cycles: &mut u32,
-        ) -> u16 {
+        pub fn addressing(&self, cpu_reg: &mut Register, mem: &mut MemMap) -> u16 {
             match self {
                 AddressingMode::Acc => 0,
                 AddressingMode::Imp => 0,
@@ -370,7 +385,7 @@ pub mod cpu {
                     addr |= (mem.read_memeory(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     let val = addr.wrapping_add(cpu_reg.x as u16);
-                    *cycles = (*cycles).wrapping_add((((addr ^ val) >> 8) & 1) as u32);
+                    cpu_cycles_add((((addr ^ val) >> 8) & 1) as u32);
                     val
                 }
                 AddressingMode::AbsYI => {
@@ -386,7 +401,7 @@ pub mod cpu {
                     addr |= (mem.read_memeory(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     let val = addr.wrapping_add(cpu_reg.y as u16);
-                    *cycles = (*cycles).wrapping_add(((addr ^ val) >> 8) as u32 & 1);
+                    cpu_cycles_add(((addr ^ val) >> 8) as u32 & 1);
                     val
                 }
                 AddressingMode::ZpXI => {
@@ -427,7 +442,7 @@ pub mod cpu {
                     let mut val = (mem.read_memeory(addr as u16) as u16)
                         | ((mem.read_memeory(addr.wrapping_add(1) as u16) as u16) << 8);
                     val = val.wrapping_add(cpu_reg.y as u16);
-                    *cycles = (*cycles).wrapping_add((((addr as u16 ^ val) >> 8) & 1) as u32);
+                    cpu_cycles_add((((addr as u16 ^ val) >> 8) & 1) as u32);
                     val
                 }
                 AddressingMode::Rel => {
@@ -532,7 +547,7 @@ pub mod cpu {
     }
 
     impl Instruction {
-        pub fn exec(&self, cpu_reg: &mut Register, mem: &mut MemMap, addr: u16, cycles: &mut u32) {
+        pub fn exec(&self, cpu_reg: &mut Register, mem: &mut MemMap, addr: u16) {
             match self {
                 Instruction::LDA => {
                     // LDA--由存储器取数送入累加器 A    M -> A
@@ -851,48 +866,48 @@ pub mod cpu {
                 Instruction::BEQ => {
                     // 如果标志位 Z = 1 则转移，否则继续
                     if cpu_reg.p.z() {
-                        self.brunch_jmp(cpu_reg, addr, cycles);
+                        self.brunch_jmp(cpu_reg, addr);
                     }
                 }
                 Instruction::BNE => {
                     // 如果标志位 Z = 0 则转移，否则继续
                     if cpu_reg.p.z() == false {
-                        self.brunch_jmp(cpu_reg, addr, cycles);
+                        self.brunch_jmp(cpu_reg, addr);
                     }
                 }
                 Instruction::BCS => {
                     // 如果标志位 C = 1 则转移，否则继续
                     if cpu_reg.p.c() {
-                        self.brunch_jmp(cpu_reg, addr, cycles);
+                        self.brunch_jmp(cpu_reg, addr);
                     }
                 }
                 Instruction::BCC => {
                     // 如果标志位 C = 0 则转移，否则继续
                     if cpu_reg.p.c() == false {
-                        self.brunch_jmp(cpu_reg, addr, cycles);
+                        self.brunch_jmp(cpu_reg, addr);
                     }
                 }
                 Instruction::BMI => {
                     // 如果标志位 N = 1 则转移，否则继续
                     if cpu_reg.p.n() {
-                        self.brunch_jmp(cpu_reg, addr, cycles);
+                        self.brunch_jmp(cpu_reg, addr);
                     }
                 }
                 Instruction::BPL => {
                     // 如果标志位 N = 0 则转移，否则继续
                     if cpu_reg.p.n() == false {
-                        self.brunch_jmp(cpu_reg, addr, cycles);
+                        self.brunch_jmp(cpu_reg, addr);
                     }
                 }
                 Instruction::BVS => {
                     if cpu_reg.p.v() {
-                        self.brunch_jmp(cpu_reg, addr, cycles);
+                        self.brunch_jmp(cpu_reg, addr);
                     }
                 } // 如果标志位 V = 1 则转移，否则继续
                 Instruction::BVC => {
                     // 如果标志位 V = 0 则转移，否则继续
                     if cpu_reg.p.v() == false {
-                        self.brunch_jmp(cpu_reg, addr, cycles);
+                        self.brunch_jmp(cpu_reg, addr);
                     }
                 }
                 Instruction::JSR => {
@@ -1106,10 +1121,8 @@ pub mod cpu {
             }
         }
 
-        fn brunch_jmp(&self, cpu_reg: &mut Register, addr: u16, cycles: &mut u32) {
-            *cycles = (*cycles)
-                .wrapping_add(1)
-                .wrapping_add((((addr ^ cpu_reg.pc) >> 8) & 1) as u32);
+        fn brunch_jmp(&self, cpu_reg: &mut Register, addr: u16) {
+            cpu_cycles_add((((addr ^ cpu_reg.pc) >> 8) & 1) as u32 + 1);
             cpu_reg.pc = addr;
         }
     }
@@ -1382,7 +1395,7 @@ pub mod cpu {
         InstruAddring { instru_name: "ISB", instru: Instruction::ISB,  instru_base_cycle : 7, addring_mode: AddressingMode::AbsXI },
     ];
 
-    pub fn execute_one_instruction(cpu_reg: &mut Register, mem: &mut MemMap, cycles: &mut u32) {
+    pub fn execute_one_instruction(cpu_reg: &mut Register, mem: &mut MemMap) {
         let machine_code: u8;
 
         machine_code = mem.read_memeory(cpu_reg.pc);
@@ -1393,19 +1406,19 @@ pub mod cpu {
         cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
 
         let instru_addring = &ISTRU_OP_CODE[machine_code as usize];
-        *cycles = (*cycles).wrapping_add(instru_addring.instru_base_cycle as u32);
+        cpu_cycles_add(instru_addring.instru_base_cycle as u32);
 
-        let op_addr = instru_addring.addring_mode.addressing(cpu_reg, mem, cycles);
+        let op_addr = instru_addring.addring_mode.addressing(cpu_reg, mem);
         // print!(
         //     "asm instruction {}, operation addr {:#x}, ",
         //     instru_addring.instru_name, op_addr
         // );
 
-        instru_addring.instru.exec(cpu_reg, mem, op_addr, cycles);
+        instru_addring.instru.exec(cpu_reg, mem, op_addr);
 
         // println!(
         //     "a {:#x}, x {:#x}, y {:#x}, p {:#x}, sp {:#x}, cycles {}",
-        //     cpu_reg.a, cpu_reg.x, cpu_reg.y, cpu_reg.p.0, cpu_reg.sp, cycles
+        //     cpu_reg.a, cpu_reg.x, cpu_reg.y, cpu_reg.p.0, cpu_reg.sp, get_cpu_cycles()
         // );
         // println!("{:#?}", instru_addring);
     }
