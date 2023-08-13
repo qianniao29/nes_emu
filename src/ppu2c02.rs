@@ -215,6 +215,24 @@ pub mod ppu {
         pub v, set_v: 7; //vblank
     }
 
+    /* ppu_addr
+        yyy NN YYYYY XXXXX
+        ||| || ||||| +++++-- coarse X scroll
+        ||| || +++++-------- coarse Y scroll
+        ||| ++-------------- nametable select
+        +++----------------- fine Y scroll
+    */
+    bitfield! {
+        pub struct PpuAddr(u16);
+        impl Debug;
+        u8;
+        pub coarse_x, set_coarse_x: 4,0;
+        pub coarse_y, set_coarse_y: 9,5;
+        pub name_tbl, set_name_tbly: 11,10;
+        pub fine_y, set_fine_y: 14,12;
+
+    }
+
     // PPU 寄存器地址空间在 CPU 的寻址范围内，实际是属于 CPU 操作
     /*
     Common Name Address Bits 	    Notes
@@ -237,15 +255,8 @@ pub mod ppu {
         pub mask: MaskReg,
         pub status: StatusReg,
         pub oam_addr: u8,  //OAM adress, write only
-        pub ppu_addr: u16, //PPU read/write address  two writes :most significant byte, least significant byte)
-        /* ppu_addr_tmp
-        yyy NN YYYYY XXXXX
-            ||| || ||||| +++++-- coarse X scroll
-            ||| || +++++-------- coarse Y scroll
-            ||| ++-------------- nametable select
-            +++----------------- fine Y scroll
-         */
-        pub ppu_addr_tmp: u16,
+        pub ppu_addr: PpuAddr, //PPU read/write address  two writes :most significant byte, least significant byte)
+        pub ppu_addr_tmp: PpuAddr,
         pub fine_x_scroll: u8,
         second_write: bool, // double write count
     }
@@ -257,8 +268,8 @@ pub mod ppu {
                 mask: MaskReg(0),
                 status: StatusReg(0),
                 oam_addr: 0,
-                ppu_addr: 0,
-                ppu_addr_tmp: 0,
+                ppu_addr: PpuAddr(0),
+                ppu_addr_tmp: PpuAddr(0),
                 fine_x_scroll: 0,
                 second_write: false,
             }
@@ -275,9 +286,9 @@ pub mod ppu {
                 }
                 0x4 => mem.oam[self.oam_addr as usize],
                 0x7 => {
-                    let val = mem.read(self.ppu_addr);
-                    self.ppu_addr = self
-                        .ppu_addr
+                    let val = mem.read(self.ppu_addr.0);
+                    self.ppu_addr.0 = self
+                        .ppu_addr.0
                         .wrapping_add(if self.ctrl.i() { 32 } else { 1 });
                     val
                 }
@@ -289,8 +300,7 @@ pub mod ppu {
             match addr & 0x0007 {
                 0x0 => {
                     self.ctrl.0 = data;
-                    self.ppu_addr_tmp =
-                        (self.ppu_addr_tmp & 0xf3ff) | (((data as u16) & 0x03) << 10);
+                    self.ppu_addr_tmp.set_name_tbly(data&0x3);
                 }
                 0x1 => {
                     self.status.0 = data;
@@ -305,20 +315,18 @@ pub mod ppu {
                 }
                 0x5 => {
                     // according to https://www.nesdev.org/wiki/PPU_scrolling
-                    let val16 = data as u16;
                     if self.second_write == false {
                         // t: ........ ...HGFED = d: HGFED...
                         // x:               CBA = d: .....CBA
                         // w:                   = 1
-                        self.ppu_addr_tmp = (self.ppu_addr_tmp & 0xffe0) | (val16 >> 3);
+                        self.ppu_addr_tmp.set_coarse_x(data >> 3);
                         self.fine_x_scroll = data & 0x7;
                         self.second_write = true;
                     } else {
                         // t: .CBA..HG FED..... = d: HGFEDCBA
                         // w:                   = 0
-                        self.ppu_addr_tmp = (self.ppu_addr_tmp & 0x8c1f)
-                            | ((val16 & 0x7) << 12)
-                            | ((val16 & 0xf8) << 2);
+                        self.ppu_addr_tmp.set_coarse_y(data>>3);
+                        self.ppu_addr_tmp.set_fine_y(data&0x7);
                         self.second_write = false;
                     }
                 }
@@ -329,23 +337,22 @@ pub mod ppu {
                         //        <unused>     <- d: AB......
                         // t: Z...... ........ <- 0 (bit Z is cleared)
                         // w:                  <- 1
-                        self.ppu_addr_tmp =
-                            (self.ppu_addr_tmp & 0x80ff) | ((data as u16 & 0x3f) << 8);
-                        self.ppu_addr = (data as u16) << 8;
+                        self.ppu_addr_tmp.0 =
+                            (self.ppu_addr_tmp.0 & 0x80ff) | ((data as u16 & 0x3f) << 8);
                         self.second_write = true;
                     } else {
                         // t: ....... ABCDEFGH <- d: ABCDEFGH
                         // v: <...all bits...> <- t: <...all bits...>
                         // w:                  <- 0
-                        self.ppu_addr_tmp = (self.ppu_addr_tmp & 0xff00) | data as u16;
-                        self.ppu_addr = self.ppu_addr_tmp;
+                        self.ppu_addr_tmp.0 = (self.ppu_addr_tmp.0 & 0xff00) | data as u16;
+                        self.ppu_addr.0 = self.ppu_addr_tmp.0;
                         self.second_write = false;
                     }
                 }
                 0x7 => {
-                    mem.write(self.ppu_addr, data);
-                    self.ppu_addr = self
-                        .ppu_addr
+                    mem.write(self.ppu_addr.0, data);
+                    self.ppu_addr.0 = self
+                        .ppu_addr.0
                         .wrapping_add(if self.ctrl.i() { 32 } else { 1 });
                 }
                 _ => unreachable!("Out of memory range!"),
@@ -432,11 +439,11 @@ pub mod ppu {
             ||| ++-------------- nametable select
             +++----------------- fine Y scroll
         */
-        let tile_x = ppu_reg.ppu_addr_tmp & 0x1f;
-        let tile_y = ppu_reg.ppu_addr_tmp >> 5 & 0x1f;
+        let tile_x = ppu_reg.ppu_addr_tmp.coarse_x() as u16;
+        let tile_y = ppu_reg.ppu_addr_tmp.coarse_y() as u16;
 
         let mut offset: [u16; 2] = [0; 2];
-        let name_tbl_base = (tile_y * 32) | 0x2000 | (ppu_reg.ppu_addr_tmp & 0xc00); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
+        let name_tbl_base = (tile_y * 32) | 0x2000 | (ppu_reg.ppu_addr_tmp.0 & 0xc00); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
 
         for i in 0..16 {
             let mut name_tbl_offset = name_tbl_base | ((tile_x + i) & 0x1f);
