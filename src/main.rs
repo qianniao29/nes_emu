@@ -68,19 +68,41 @@ fn main() -> Result<(), error::CustomError> {
             cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
         }
         disp::vblank(&mut cpu_reg, &mut mem);
-        disp.scanline_color_indx = [0;256];
+        disp.scanline_color_indx = [0; 256];
         //genert bg platette data
         disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[0..16]);
+        let mut sprite0_check_buf = [0_u8;8];
+        let (sprite0_x, sprite0_y) = ppu::check_sprint0(&mem.ppu_reg,
+            &mut mem.ppu_mem,&mut sprite0_check_buf);
         for j in 0..240 {
             // if mem.ppu_reg.mask.bg() == false {continue;}
-            ppu::render_scanline(&mem.ppu_reg, &mut mem.ppu_mem, &mut disp.scanline_color_indx);
+            ppu::render_scanline(
+                &mem.ppu_reg,
+                &mut mem.ppu_mem,
+                &mut disp.scanline_color_indx,
+            );
+            // sprite0 hit
+            if(j == sprite0_y){
+                // if sprite0_check_buf[0]
+
+            }
             disp.draw_scanline(j);
+            //dot 256, 257
+            if mem.ppu_reg.mask.bg() {
+                ppu::wrapping_around(&mut mem.ppu_reg);
+                ppu::cpoy_x_from_t_to_v(&mut mem.ppu_reg);
+            }
         }
+
         //genert sprite platette data
         disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
         for id in (0..64).rev() {
-            let (x, y) =
-                ppu::render_sprite(id, &mem.ppu_reg, &mut mem.ppu_mem, &mut disp.scanline_color_indx);
+            let (x, y) = ppu::render_sprite(
+                id,
+                &mem.ppu_reg,
+                &mut mem.ppu_mem,
+                &mut disp.scanline_color_indx,
+            );
             if y >= 0xef {
                 continue;
             }

@@ -37,7 +37,7 @@ pub mod disp_sdl2 {
                 .unwrap();
 
             let palette_data: [[u8; 4]; 16] = [[0; 4]; 16];
-            let scanline_color_indx= [0; 256];
+            let scanline_color_indx = [0; 256];
 
             canvas.set_draw_color(Color::RGB(0, 0, 0));
             canvas.clear();

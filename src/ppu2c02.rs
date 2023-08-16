@@ -228,7 +228,7 @@ pub mod ppu {
         u8;
         pub coarse_x, set_coarse_x: 4,0;
         pub coarse_y, set_coarse_y: 9,5;
-        pub name_tbl, set_name_tbly: 11,10;
+        pub name_tbl, set_name_tbl: 11,10;
         pub fine_y, set_fine_y: 14,12;
 
     }
@@ -254,7 +254,7 @@ pub mod ppu {
         pub ctrl: CtrlReg,
         pub mask: MaskReg,
         pub status: StatusReg,
-        pub oam_addr: u8,  //OAM adress, write only
+        pub oam_addr: u8,      //OAM adress, write only
         pub ppu_addr: PpuAddr, //PPU read/write address  two writes :most significant byte, least significant byte)
         pub ppu_addr_tmp: PpuAddr,
         pub fine_x_scroll: u8,
@@ -287,9 +287,10 @@ pub mod ppu {
                 0x4 => mem.oam[self.oam_addr as usize],
                 0x7 => {
                     let val = mem.read(self.ppu_addr.0);
-                    self.ppu_addr.0 = self
-                        .ppu_addr.0
-                        .wrapping_add(if self.ctrl.i() { 32 } else { 1 });
+                    self.ppu_addr.0 =
+                        self.ppu_addr
+                            .0
+                            .wrapping_add(if self.ctrl.i() { 32 } else { 1 });
                     val
                 }
                 _ => unreachable!("Out of memory range!"),
@@ -300,7 +301,7 @@ pub mod ppu {
             match addr & 0x0007 {
                 0x0 => {
                     self.ctrl.0 = data;
-                    self.ppu_addr_tmp.set_name_tbly(data&0x3);
+                    self.ppu_addr_tmp.set_name_tbl(data & 0x3);
                 }
                 0x1 => {
                     self.status.0 = data;
@@ -325,8 +326,8 @@ pub mod ppu {
                     } else {
                         // t: .CBA..HG FED..... = d: HGFEDCBA
                         // w:                   = 0
-                        self.ppu_addr_tmp.set_coarse_y(data>>3);
-                        self.ppu_addr_tmp.set_fine_y(data&0x7);
+                        self.ppu_addr_tmp.set_coarse_y(data >> 3);
+                        self.ppu_addr_tmp.set_fine_y(data & 0x7);
                         self.second_write = false;
                     }
                 }
@@ -351,9 +352,10 @@ pub mod ppu {
                 }
                 0x7 => {
                     mem.write(self.ppu_addr.0, data);
-                    self.ppu_addr.0 = self
-                        .ppu_addr.0
-                        .wrapping_add(if self.ctrl.i() { 32 } else { 1 });
+                    self.ppu_addr.0 =
+                        self.ppu_addr
+                            .0
+                            .wrapping_add(if self.ctrl.i() { 32 } else { 1 });
                 }
                 _ => unreachable!("Out of memory range!"),
             }
@@ -426,19 +428,100 @@ pub mod ppu {
         }
     }
 
+    pub fn wrapping_around(ppu_reg: &mut Register) {
+        // http://wiki.nesdev.com/w/index.php/PPU_scrolling#Wrapping_around
+
+        // coarse x
+        // if ppu_reg.ppu_addr.coarse_x() >= 31{
+        //     ppu_reg.ppu_addr.set_coarse_x(0);
+        //     ppu_reg.ppu_addr.set_name_tbl(ppu_reg.ppu_addr.name_tbl()^0x1);
+        // }else {
+        //     ppu_reg.ppu_addr.set_coarse_x(ppu_reg.ppu_addr.coarse_x()+1);
+        // }
+        // coarse y
+        if ppu_reg.ppu_addr.fine_y() >= 7 {
+            ppu_reg.ppu_addr.set_fine_y(0);
+            if ppu_reg.ppu_addr.coarse_y() == 29 {
+                ppu_reg.ppu_addr.set_coarse_y(0);
+                ppu_reg
+                    .ppu_addr
+                    .set_name_tbl(ppu_reg.ppu_addr.name_tbl() ^ 0x10);
+            } else if ppu_reg.ppu_addr.coarse_y() == 31 {
+                ppu_reg.ppu_addr.set_coarse_y(0);
+            } else {
+                ppu_reg
+                    .ppu_addr
+                    .set_coarse_y(ppu_reg.ppu_addr.coarse_y() + 1);
+            }
+        } else {
+            ppu_reg.ppu_addr.set_fine_y(ppu_reg.ppu_addr.fine_y() + 1);
+        }
+    }
+
+    pub fn cpoy_x_from_t_to_v(ppu_reg: &mut Register) {
+        ppu_reg
+            .ppu_addr
+            .set_coarse_x(ppu_reg.ppu_addr_tmp.coarse_x());
+        ppu_reg.ppu_addr.set_name_tbl(
+            (ppu_reg.ppu_addr.name_tbl() & 0x10) | (ppu_reg.ppu_addr_tmp.name_tbl() & 0x01),
+        );
+    }
+
+    pub fn cpoy_y_from_t_to_v(ppu_reg: &mut Register) {
+        ppu_reg
+            .ppu_addr
+            .set_coarse_y(ppu_reg.ppu_addr_tmp.coarse_y());
+        ppu_reg.ppu_addr.set_fine_y(ppu_reg.ppu_addr_tmp.fine_y());
+        ppu_reg.ppu_addr.set_name_tbl(
+            (ppu_reg.ppu_addr.name_tbl() & 0x01) | (ppu_reg.ppu_addr_tmp.name_tbl() & 0x10),
+        );
+    }
+
+    pub fn check_sprint0(
+        ppu_reg: &Register,
+        ppu_mem: &mut MemMap,
+        sprite0_buf: &mut [u8],
+    ) -> (u16, u16) {
+        let sprite = Sprite::new(&ppu_mem.oam[0..4]);
+        if sprite.pos_y >= 239 {
+            return (sprite.pos_x as u16, sprite.pos_y as u16);
+        }
+        let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
+        let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
+        let mut offset1 = offset0 + 8;
+
+        let y_range = if sprite.attr.v() {
+            (0..8).rev().map(|n| n).collect::<Vec<_>>()
+        } else {
+            (0..8).map(|n| n).collect::<Vec<_>>()
+        };
+        let x_range = if sprite.attr.h() {
+            (0..8).map(|n| n).collect::<Vec<_>>()
+        } else {
+            (0..8).rev().map(|n| n).collect::<Vec<_>>()
+        };
+        for y in y_range {
+            ppu_mem.read(offset0);
+            let name0 = ppu_mem.read(offset0);
+            ppu_mem.read(offset1);
+            let name1 = ppu_mem.read(offset1);
+            for j in &x_range {
+                //颜色索引低 2bit 是否为 0，不为 0 的话就是不透明色
+                sprite0_buf[y] |= (((name0 >> j) | (name1 >> j)) & 0x1) << j;
+            }
+            offset0 += 1;
+            offset1 += 1;
+        }
+
+        (sprite.pos_x as u16, sprite.pos_y as u16)
+    }
+
     pub fn render_scanline(ppu_reg: &Register, ppu_mem: &mut MemMap, color_indx: &mut [u8]) {
         // if ppu_reg.mask.bg() == false {
         //     //TODO: 放在函数外的循环前面？
         //     return;
         // }
         let ind = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
-        /* ppu_addr_tmp
-            yyy NN YYYYY XXXXX
-            ||| || ||||| +++++-- coarse X scroll
-            ||| || +++++-------- coarse Y scroll
-            ||| ++-------------- nametable select
-            +++----------------- fine Y scroll
-        */
         let tile_x = ppu_reg.ppu_addr_tmp.coarse_x() as u16;
         let tile_y = ppu_reg.ppu_addr_tmp.coarse_y() as u16;
 
