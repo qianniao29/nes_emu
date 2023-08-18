@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
 pub mod ppu {
+    use ahash::AHashMap;
     use std::cell::RefCell;
     use std::rc::Rc;
+
     /*
     地址 	         大小     描述
     $0000-$0FFF 	$1000 	图案表 0
@@ -210,8 +212,8 @@ pub mod ppu {
         pub struct StatusReg(u8);
         impl Debug;
         u8;
-        o, _: 5; //sprite overflow
-        s, _: 6; //sprite 0 hit
+        pub o, set_o: 5; //sprite overflow
+        pub s, set_s: 6; //sprite 0 hit
         pub v, set_v: 7; //vblank
     }
 
@@ -514,6 +516,38 @@ pub mod ppu {
         }
 
         (sprite.pos_x as u16, sprite.pos_y as u16)
+    }
+
+    pub fn check_backgroud(x: usize, color_indx: &[u8]) -> u8 {
+        let mut check_bg = 0;
+
+        for i in 0..8 {
+            check_bg |= ((color_indx[x + i] | (color_indx[x + i] >> 1)) & 0x1) << i;
+        }
+        check_bg
+    }
+
+    pub fn check_sprite_overflow(ppu_reg: &Register, ppu_mem: &MemMap) -> u16 {
+        if ppu_reg.mask.bg() == false && ppu_reg.mask.s() == false {
+            return 0xffff;
+        }
+        let mut cnt_map: AHashMap<u8, u8> = AHashMap::new();
+        let height = if ppu_reg.ctrl.h() {
+            (0..16).map(|n| n).collect::<Vec<_>>()
+        } else {
+            (0..8).map(|n| n).collect::<Vec<_>>()
+        };
+
+        for i in 0..64 {
+            for j in &height {
+                let cnt = cnt_map.entry(ppu_mem.oam[4 * i] + j).or_insert(1);
+                *cnt = *cnt + 1;
+                if *cnt > 8 {
+                    return (ppu_mem.oam[0 * i] + j) as u16;
+                }
+            }
+        }
+        return 0xffff;
     }
 
     pub fn render_scanline(ppu_reg: &Register, ppu_mem: &mut MemMap, color_indx: &mut [u8]) {

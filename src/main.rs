@@ -27,7 +27,6 @@ use rom_fs::rom;
 
 fn reset(cpu_reg: &mut cpu::Register, mem: &mut cpu::MemMap) {
     cpu_reg.reset(mem);
-    cpu::cpu_cycles_reset();
 }
 
 fn main() -> Result<(), error::CustomError> {
@@ -63,38 +62,89 @@ fn main() -> Result<(), error::CustomError> {
     /*--------------------------------------------------------*/
     let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
 
+    let dis_std = disp::NTSC;
+
     'running: loop {
-        for _n in 0..4000 {
-            cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
-        }
-        disp::vblank(&mut cpu_reg, &mut mem);
-        disp.scanline_color_indx = [0; 256];
+        let mut master_cycles: u32 = 0;
+        cpu::cpu_cycles_reset();
+
+        // disp.scanline_color_indx = [0; 256];
+
         //genert bg platette data
         disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[0..16]);
-        let mut sprite0_check_buf = [0_u8;8];
-        let (sprite0_x, sprite0_y) = ppu::check_sprint0(&mem.ppu_reg,
-            &mut mem.ppu_mem,&mut sprite0_check_buf);
+        let mut sprite0_check_buf = [0_u8; 8];
+        let (sprite0_x, sprite0_y) =
+            ppu::check_sprint0(&mem.ppu_reg, &mut mem.ppu_mem, &mut sprite0_check_buf);
+        let sprite_ov_line = ppu::check_sprite_overflow(&mem.ppu_reg, &mem.ppu_mem);
         for j in 0..240 {
-            // if mem.ppu_reg.mask.bg() == false {continue;}
-            ppu::render_scanline(
-                &mem.ppu_reg,
-                &mut mem.ppu_mem,
-                &mut disp.scanline_color_indx,
-            );
-            // sprite0 hit
-            if(j == sprite0_y){
-                // if sprite0_check_buf[0]
-
+            if mem.ppu_reg.mask.bg() {
+                ppu::render_scanline(
+                    &mem.ppu_reg,
+                    &mut mem.ppu_mem,
+                    &mut disp.scanline_color_indx,
+                );
+                disp.draw_scanline(j);
+                // sprite0 hit
+                if (j >= sprite0_y) && (j < sprite0_y + 8) {
+                    let check_bg = ppu::check_backgroud(sprite0_x as usize, &disp.scanline_color_indx);
+                    if (mem.ppu_reg.status.s() == false) && (sprite0_check_buf[0] & check_bg != 0) {
+                        mem.ppu_reg.status.set_s(true);
+                    }
+                }
             }
-            disp.draw_scanline(j);
+            if sprite_ov_line == j {
+                mem.ppu_reg.status.set_o(true);
+            }
+            // execute code in one scanline cycles
+            master_cycles += dis_std.master_cycles_scanline as u32;
+            let cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
+            while cpu::get_cpu_cycles() < cpu_cycles_end {
+                cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
+            }
             //dot 256, 257
             if mem.ppu_reg.mask.bg() {
                 ppu::wrapping_around(&mut mem.ppu_reg);
                 ppu::cpoy_x_from_t_to_v(&mut mem.ppu_reg);
             }
+            //sync horizon
         }
 
-        //genert sprite platette data
+        // execute code in one scanline cycles
+        master_cycles += dis_std.master_cycles_scanline as u32;
+        let cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
+        while cpu::get_cpu_cycles() < cpu_cycles_end {
+            cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
+        }
+        //sync horizon
+
+        //start vblank
+        disp::vblank(&mut cpu_reg, &mut mem);
+        // execute code after NMI
+        for _ in 0..dis_std.vblank_length {
+            master_cycles += dis_std.master_cycles_scanline as u32;
+            let cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
+            while cpu::get_cpu_cycles() < cpu_cycles_end {
+                cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
+            }
+            //sync horizon
+        }
+        //clear ppu status
+        mem.ppu_reg.status.0 = 0;
+
+        //Pre-render
+        master_cycles += dis_std.cpu_cycle_per_frame as u32;
+        let cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
+        while cpu::get_cpu_cycles() < cpu_cycles_end {
+            cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
+        }
+        //sync horizon
+
+        //stop vblank
+        if mem.ppu_reg.mask.bg() {
+            ppu::cpoy_y_from_t_to_v(&mut mem.ppu_reg);
+        }
+
+        // genert sprite platette data
         disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
         for id in (0..64).rev() {
             let (x, y) = ppu::render_sprite(
