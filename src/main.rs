@@ -86,7 +86,8 @@ fn main() -> Result<(), error::CustomError> {
                 disp.draw_scanline(j);
                 // sprite0 hit
                 if (j >= sprite0_y) && (j < sprite0_y + 8) {
-                    let check_bg = ppu::check_backgroud(sprite0_x as usize, &disp.scanline_color_indx);
+                    let check_bg =
+                        ppu::check_backgroud(sprite0_x as usize, &disp.scanline_color_indx);
                     if (mem.ppu_reg.status.s() == false) && (sprite0_check_buf[0] & check_bg != 0) {
                         mem.ppu_reg.status.set_s(true);
                     }
@@ -139,7 +140,7 @@ fn main() -> Result<(), error::CustomError> {
         }
         //sync horizon
 
-        //stop vblank
+        //scanline 261 clear vblank
         if mem.ppu_reg.mask.bg() {
             ppu::cpoy_y_from_t_to_v(&mut mem.ppu_reg);
         }

@@ -540,6 +540,9 @@ pub mod ppu {
 
         for i in 0..64 {
             for j in &height {
+                if (ppu_mem.oam[4 * i] + j) > 240 {
+                    continue;
+                }
                 let cnt = cnt_map.entry(ppu_mem.oam[4 * i] + j).or_insert(1);
                 *cnt = *cnt + 1;
                 if *cnt > 8 {
@@ -610,6 +613,9 @@ pub mod ppu {
         let sprite = Sprite::new(&ppu_mem.oam[sprite_id as usize * 4..sprite_id as usize * 4 + 4]);
         if sprite.pos_y >= 0xef {
             return (sprite.pos_x as u16, sprite.pos_y as u16);
+        }
+        if sprite.attr.p() {
+            return (255, 255);
         }
         let h2bit = sprite.attr.h2bit() << 2;
         let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
