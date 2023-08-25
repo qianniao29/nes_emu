@@ -52,6 +52,21 @@ pub mod ppu {
             }
         }
 
+        pub fn read_direct(&self, addr: u16) -> u8 {
+            let addr_map = addr & 0x3fff;
+
+            if addr_map < 0x3f00 {
+                let i: usize = (addr_map >> 10).into();
+                let j: usize = (addr_map & 0x3ff).into();
+                let bank = self.bank[i].clone();
+                let val = bank.borrow()[j];
+                val
+            } else {
+                let palet_addr: usize = ((addr_map - 0x3f00) & 0x1f).into();
+                self.palette_indx_tbl[palet_addr]
+            }
+        }
+
         pub fn write(&mut self, addr: u16, data: u8) {
             let addr_map = addr & 0x3fff;
 
@@ -430,17 +445,8 @@ pub mod ppu {
         }
     }
 
-    pub fn wrapping_around(ppu_reg: &mut Register) {
+    pub fn coarse_y_wrapping(ppu_reg: &mut Register) {
         // http://wiki.nesdev.com/w/index.php/PPU_scrolling#Wrapping_around
-
-        // coarse x
-        // if ppu_reg.ppu_addr.coarse_x() >= 31{
-        //     ppu_reg.ppu_addr.set_coarse_x(0);
-        //     ppu_reg.ppu_addr.set_name_tbl(ppu_reg.ppu_addr.name_tbl()^0x1);
-        // }else {
-        //     ppu_reg.ppu_addr.set_coarse_x(ppu_reg.ppu_addr.coarse_x()+1);
-        // }
-        // coarse y
         if ppu_reg.ppu_addr.fine_y() >= 7 {
             ppu_reg.ppu_addr.set_fine_y(0);
             if ppu_reg.ppu_addr.coarse_y() == 29 {
@@ -528,9 +534,9 @@ pub mod ppu {
     }
 
     pub fn check_sprite_overflow(ppu_reg: &Register, ppu_mem: &MemMap) -> u16 {
-        if ppu_reg.mask.bg() == false && ppu_reg.mask.s() == false {
-            return 0xffff;
-        }
+        // if ppu_reg.mask.bg() == false && ppu_reg.mask.s() == false {
+        //     return 0xffff;
+        // }
         let mut cnt_map: AHashMap<u8, u8> = AHashMap::new();
         let height = if ppu_reg.ctrl.h() {
             (0..16).map(|n| n).collect::<Vec<_>>()
@@ -540,7 +546,7 @@ pub mod ppu {
 
         for i in 0..64 {
             for j in &height {
-                if (ppu_mem.oam[4 * i] + j) > 240 {
+                if (ppu_mem.oam[4 * i] as u16 + *j as u16) > 240 {
                     continue;
                 }
                 let cnt = cnt_map.entry(ppu_mem.oam[4 * i] + j).or_insert(1);
@@ -553,54 +559,77 @@ pub mod ppu {
         return 0xffff;
     }
 
-    pub fn render_scanline(ppu_reg: &Register, ppu_mem: &mut MemMap, color_indx: &mut [u8]) {
+    /*
+    计算所在属性表
+    1 个字节控制 4*4=16 个 tile，2bit 控制 2*2=4 个 tile。1 个字节控制 32*32 像素
+    */
+    fn calc_color_h2bit(tile_x: u16, tile_y: u16, ppu_mem: &MemMap) -> u8 {
+        let attribute_id = (tile_x >> 2) + (tile_y >> 2) * 8;
+        let attr = ppu_mem.read_direct(attribute_id + 960 + 0x2000);
+        let shift = ((tile_x & 0x2) + ((tile_y & 0x2) << 1)) as u8; //((pos_x&0x1f)>>4 + (pos_y&0x1f)>>4*2)*2;
+        ((attr >> shift) & 0x3) << 2
+    }
+    fn calc_pattern(ppu_reg: &Register, ppu_mem: &MemMap, name_tbl_offset: u16) -> u16 {
+        let ind = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
+        // read name table
+        let mut pattern = ppu_mem.read_direct(name_tbl_offset) as u16;
+        pattern <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
+        pattern + ind + ppu_reg.ppu_addr_tmp.fine_y() as u16
+    }
+    fn coarse_x_wrapping(tile_x: &mut u16, name_tbl_base: &mut u16) {
+        if *tile_x >= 31 {
+            *tile_x = 0;
+            *name_tbl_base = *name_tbl_base ^ 0x400;
+        } else {
+            *tile_x += 1;
+        }
+    }
+
+    pub fn render_scanline(ppu_reg: &Register, ppu_mem: &MemMap, color_indx: &mut [u8]) {
         // if ppu_reg.mask.bg() == false {
         //     //TODO: 放在函数外的循环前面？
         //     return;
         // }
-        let ind = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
-        let tile_x = ppu_reg.ppu_addr_tmp.coarse_x() as u16;
+        let mut tile_x = ppu_reg.ppu_addr_tmp.coarse_x() as u16;
         let tile_y = ppu_reg.ppu_addr_tmp.coarse_y() as u16;
 
-        let mut offset: [u16; 2] = [0; 2];
-        let name_tbl_base = (tile_y * 32) | 0x2000 | (ppu_reg.ppu_addr_tmp.0 & 0xc00); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
+        let mut name_tbl_base = (tile_y * 32) | 0x2000 | (ppu_reg.ppu_addr_tmp.0 & 0xc00); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
+        let mut buf_ind = 0;
 
-        for i in 0..16 {
-            let mut name_tbl_offset = name_tbl_base | ((tile_x + i) & 0x1f);
-            // read name table
-            ppu_mem.read(name_tbl_offset); // refresh cache
-            let mut pattern = ppu_mem.read(name_tbl_offset) as u16; //read again
-            pattern <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
-            offset[0] = pattern + ind;
-            name_tbl_offset = name_tbl_base | ((tile_x + i + 1) & 0x1f);
-            ppu_mem.read(name_tbl_offset); // refresh cache
-            pattern = ppu_mem.read(name_tbl_offset) as u16; //read again
-            pattern <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
-            offset[1] = pattern + ind;
+        let mut fill_color = |tile_nums: usize, pixel_start: usize, pixel_end: usize| {
+            if pixel_end == pixel_start {
+                return;
+            }
+            let mut offset: [u16; 2] = [0; 2];
+            let color_h2bit = calc_color_h2bit(tile_x, tile_y, ppu_mem);
 
-            /*
-            计算所在属性表
-            1 个字节控制 4*4=16 个 tile，2bit 控制 2*2=4 个 tile。1 个字节控制 32*32 像素
-            */
-            let attribute_id = (tile_x >> 2) + (tile_y >> 2) * 8;
-            let attr = ppu_mem.read(attribute_id + 960 + 0x2000);
-            let shift = ((tile_x & 0x2) + ((tile_y & 0x2) << 1)) as u8; //((pos_x&0x1f)>>4 + (pos_y&0x1f)>>4*2)*2;
-            let color_h2bit = ((attr >> shift) & 0x3) << 2;
+            for n in 0..tile_nums {
+                offset[n] = calc_pattern(ppu_reg, ppu_mem, name_tbl_base | tile_x);
+                coarse_x_wrapping(&mut tile_x, &mut name_tbl_base);
 
-            for n in 0..2 {
-                ppu_mem.read(offset[n]);
-                let name0 = ppu_mem.read(offset[n]);
-                ppu_mem.read(offset[n] + 8);
-                let name1 = ppu_mem.read(offset[n] + 8);
-                for j in 0..8 {
-                    let inx = (i as usize) * 16 + n * 8 + j;
+                let name0 = ppu_mem.read_direct(offset[n]);
+                let name1 = ppu_mem.read_direct(offset[n] + 8);
+                for j in pixel_start..pixel_end {
                     //颜色索引高 2bit
-                    color_indx[inx] = color_h2bit;
+                    color_indx[buf_ind] = color_h2bit;
                     //颜色索引低 2bit
-                    color_indx[inx] |= (name0 >> (7 - j)) & 0x1;
-                    color_indx[inx] |= ((name1 >> (7 - j)) & 0x1) << 1;
+                    color_indx[buf_ind] |= (name0 >> (7 - j)) & 0x1;
+                    color_indx[buf_ind] |= ((name1 >> (7 - j)) & 0x1) << 1;
+                    buf_ind += 1;
                 }
             }
+        };
+        if ppu_reg.fine_x_scroll == 0 {
+            for _ in 0..16 {
+                fill_color(2, 0, 8);
+            }
+        } else {
+            fill_color(1, ppu_reg.fine_x_scroll as usize, 8);
+            fill_color(1, 0, 8);
+            for _ in 1..16 {
+                fill_color(2, 0, 8);
+            }
+            fill_color(1, 0, ppu_reg.fine_x_scroll as usize);
         }
     }
 
