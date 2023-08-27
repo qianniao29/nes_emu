@@ -569,67 +569,68 @@ pub mod ppu {
         let shift = ((tile_x & 0x2) + ((tile_y & 0x2) << 1)) as u8; //((pos_x&0x1f)>>4 + (pos_y&0x1f)>>4*2)*2;
         ((attr >> shift) & 0x3) << 2
     }
-    fn calc_pattern(ppu_reg: &Register, ppu_mem: &MemMap, name_tbl_offset: u16) -> u16 {
+    fn calc_pattern(ppu_reg: &Register, ppu_mem: &MemMap) -> u16 {
+        let name_tbl_addr = 0x2000 | (ppu_reg.ppu_addr.0 & 0xfff); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
         let ind = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
         // read name table
-        let mut pattern = ppu_mem.read_direct(name_tbl_offset) as u16;
-        pattern <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
-        pattern + ind + ppu_reg.ppu_addr_tmp.fine_y() as u16
+        let mut pattern_addr = ppu_mem.read_direct(name_tbl_addr) as u16;
+        pattern_addr <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
+        pattern_addr + ind + ppu_reg.ppu_addr.fine_y() as u16
     }
-    fn coarse_x_wrapping(tile_x: &mut u16, name_tbl_base: &mut u16) {
-        if *tile_x >= 31 {
-            *tile_x = 0;
-            *name_tbl_base = *name_tbl_base ^ 0x400;
+    fn coarse_x_wrapping(ppu_reg: &mut Register) {
+        if ppu_reg.ppu_addr.coarse_x() >= 31 {
+            ppu_reg.ppu_addr.set_coarse_x(0);
+            ppu_reg.ppu_addr.set_name_tbl(ppu_reg.ppu_addr.name_tbl()^0x1);
         } else {
-            *tile_x += 1;
+            ppu_reg.ppu_addr.set_coarse_x(ppu_reg.ppu_addr.coarse_x()+1);
         }
     }
 
-    pub fn render_scanline(ppu_reg: &Register, ppu_mem: &MemMap, color_indx: &mut [u8]) {
+    pub fn render_scanline(ppu_reg: &mut Register, ppu_mem: &MemMap, color_indx: &mut [u8]) {
         // if ppu_reg.mask.bg() == false {
         //     //TODO: 放在函数外的循环前面？
         //     return;
         // }
-        let mut tile_x = ppu_reg.ppu_addr_tmp.coarse_x() as u16;
-        let tile_y = ppu_reg.ppu_addr_tmp.coarse_y() as u16;
 
-        let mut name_tbl_base = (tile_y * 32) | 0x2000 | (ppu_reg.ppu_addr_tmp.0 & 0xc00); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
         let mut buf_ind = 0;
+        let fine_x = ppu_reg.fine_x_scroll as usize;
 
         let mut fill_color = |tile_nums: usize, pixel_start: usize, pixel_end: usize| {
             if pixel_end == pixel_start {
                 return;
             }
-            let mut offset: [u16; 2] = [0; 2];
+            let tile_x = ppu_reg.ppu_addr.coarse_x() as u16;
+            let tile_y = ppu_reg.ppu_addr.coarse_y() as u16;    
             let color_h2bit = calc_color_h2bit(tile_x, tile_y, ppu_mem);
 
-            for n in 0..tile_nums {
-                offset[n] = calc_pattern(ppu_reg, ppu_mem, name_tbl_base | tile_x);
-                coarse_x_wrapping(&mut tile_x, &mut name_tbl_base);
+            for _ in 0..tile_nums {
+                let offset = calc_pattern(ppu_reg, ppu_mem);
+                coarse_x_wrapping(ppu_reg);
 
-                let name0 = ppu_mem.read_direct(offset[n]);
-                let name1 = ppu_mem.read_direct(offset[n] + 8);
+                let pattern0 = ppu_mem.read_direct(offset);
+                let pattern1 = ppu_mem.read_direct(offset + 8);
                 for j in pixel_start..pixel_end {
                     //颜色索引高 2bit
                     color_indx[buf_ind] = color_h2bit;
                     //颜色索引低 2bit
-                    color_indx[buf_ind] |= (name0 >> (7 - j)) & 0x1;
-                    color_indx[buf_ind] |= ((name1 >> (7 - j)) & 0x1) << 1;
+                    color_indx[buf_ind] |= (pattern0 >> (7 - j)) & 0x1;
+                    color_indx[buf_ind] |= ((pattern1 >> (7 - j)) & 0x1) << 1;
                     buf_ind += 1;
                 }
             }
         };
-        if ppu_reg.fine_x_scroll == 0 {
+       
+        if fine_x == 0 {
             for _ in 0..16 {
                 fill_color(2, 0, 8);
             }
         } else {
-            fill_color(1, ppu_reg.fine_x_scroll as usize, 8);
+            fill_color(1, fine_x, 8);
             fill_color(1, 0, 8);
             for _ in 1..16 {
                 fill_color(2, 0, 8);
             }
-            fill_color(1, 0, ppu_reg.fine_x_scroll as usize);
+            fill_color(1, 0, fine_x);
         }
     }
 

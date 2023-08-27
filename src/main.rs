@@ -82,7 +82,7 @@ fn main() -> Result<(), error::CustomError> {
         for j in 0..240 {
             // if mem.ppu_reg.mask.bg() {
             ppu::render_scanline(
-                &mem.ppu_reg,
+                &mut mem.ppu_reg,
                 &mut mem.ppu_mem,
                 &mut disp.scanline_color_indx,
             );
