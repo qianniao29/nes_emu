@@ -327,6 +327,7 @@ pub mod cpu {
         val_pc = mem.read_memeory(NMI_VECT_ADDR) as u16;
         val_pc |= (mem.read_memeory(NMI_VECT_ADDR + 1) as u16) << 8;
         cpu_reg.pc = val_pc;
+        cpu_cycles_add(7);
     }
 
     #[derive(Debug)]

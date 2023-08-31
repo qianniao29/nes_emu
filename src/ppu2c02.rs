@@ -245,7 +245,8 @@ pub mod ppu {
         u8;
         pub coarse_x, set_coarse_x: 4,0;
         pub coarse_y, set_coarse_y: 9,5;
-        pub name_tbl, set_name_tbl: 11,10;
+        pub name_tbl_x, set_name_tbl_x: 10;
+        pub name_tbl_y, set_name_tbl_y: 11;
         pub fine_y, set_fine_y: 14,12;
 
     }
@@ -318,10 +319,11 @@ pub mod ppu {
             match addr & 0x0007 {
                 0x0 => {
                     self.ctrl.0 = data;
-                    self.ppu_addr_tmp.set_name_tbl(data & 0x3);
+                    self.ppu_addr_tmp.set_name_tbl_x(data & 0x1 == 0x01);
+                    self.ppu_addr_tmp.set_name_tbl_y(data & 0x2 == 0x02);
                 }
                 0x1 => {
-                    self.status.0 = data;
+                    self.mask.0 = data;
                 }
                 0x2 => {}
                 0x3 => {
@@ -453,7 +455,7 @@ pub mod ppu {
                 ppu_reg.ppu_addr.set_coarse_y(0);
                 ppu_reg
                     .ppu_addr
-                    .set_name_tbl(ppu_reg.ppu_addr.name_tbl() ^ 0x10);
+                    .set_name_tbl_y(!ppu_reg.ppu_addr.name_tbl_y());
             } else if ppu_reg.ppu_addr.coarse_y() == 31 {
                 ppu_reg.ppu_addr.set_coarse_y(0);
             } else {
@@ -470,9 +472,9 @@ pub mod ppu {
         ppu_reg
             .ppu_addr
             .set_coarse_x(ppu_reg.ppu_addr_tmp.coarse_x());
-        ppu_reg.ppu_addr.set_name_tbl(
-            (ppu_reg.ppu_addr.name_tbl() & 0x10) | (ppu_reg.ppu_addr_tmp.name_tbl() & 0x01),
-        );
+        ppu_reg
+            .ppu_addr
+            .set_name_tbl_x(ppu_reg.ppu_addr_tmp.name_tbl_x());
     }
 
     pub fn cpoy_y_from_t_to_v(ppu_reg: &mut Register) {
@@ -480,9 +482,9 @@ pub mod ppu {
             .ppu_addr
             .set_coarse_y(ppu_reg.ppu_addr_tmp.coarse_y());
         ppu_reg.ppu_addr.set_fine_y(ppu_reg.ppu_addr_tmp.fine_y());
-        ppu_reg.ppu_addr.set_name_tbl(
-            (ppu_reg.ppu_addr.name_tbl() & 0x01) | (ppu_reg.ppu_addr_tmp.name_tbl() & 0x10),
-        );
+        ppu_reg
+            .ppu_addr
+            .set_name_tbl_y(ppu_reg.ppu_addr_tmp.name_tbl_y());
     }
 
     pub fn check_sprint0(
@@ -534,25 +536,23 @@ pub mod ppu {
     }
 
     pub fn check_sprite_overflow(ppu_reg: &Register, ppu_mem: &MemMap) -> u16 {
-        // if ppu_reg.mask.bg() == false && ppu_reg.mask.s() == false {
-        //     return 0xffff;
-        // }
+        if ppu_reg.mask.bg() == false && ppu_reg.mask.s() == false {
+            return 0xffff;
+        }
         let mut cnt_map: AHashMap<u8, u8> = AHashMap::new();
-        let height = if ppu_reg.ctrl.h() {
-            (0..16).map(|n| n).collect::<Vec<_>>()
-        } else {
-            (0..8).map(|n| n).collect::<Vec<_>>()
-        };
+        let height = if ppu_reg.ctrl.h() { 16 } else { 8 };
 
+        let mut pos_y: u8;
         for i in 0..64 {
-            for j in &height {
-                if (ppu_mem.oam[4 * i] as u16 + *j as u16) > 240 {
+            for j in 0..height {
+                pos_y = ppu_mem.oam[4 * i] + j;
+                if (pos_y < 8) || (pos_y > 240) {
                     continue;
                 }
-                let cnt = cnt_map.entry(ppu_mem.oam[4 * i] + j).or_insert(1);
+                let cnt = cnt_map.entry(pos_y).or_insert(1);
                 *cnt = *cnt + 1;
                 if *cnt > 8 {
-                    return (ppu_mem.oam[0 * i] + j) as u16;
+                    return pos_y as u16;
                 }
             }
         }
@@ -571,18 +571,22 @@ pub mod ppu {
     }
     fn calc_pattern(ppu_reg: &Register, ppu_mem: &MemMap) -> u16 {
         let name_tbl_addr = 0x2000 | (ppu_reg.ppu_addr.0 & 0xfff); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
-        let ind = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
+        let base = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
         // read name table
         let mut pattern_addr = ppu_mem.read_direct(name_tbl_addr) as u16;
         pattern_addr <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
-        pattern_addr + ind + ppu_reg.ppu_addr.fine_y() as u16
+        pattern_addr + base + ppu_reg.ppu_addr.fine_y() as u16
     }
     fn coarse_x_wrapping(ppu_reg: &mut Register) {
         if ppu_reg.ppu_addr.coarse_x() >= 31 {
             ppu_reg.ppu_addr.set_coarse_x(0);
-            ppu_reg.ppu_addr.set_name_tbl(ppu_reg.ppu_addr.name_tbl()^0x1);
+            ppu_reg
+                .ppu_addr
+                .set_name_tbl_x(!ppu_reg.ppu_addr.name_tbl_x());
         } else {
-            ppu_reg.ppu_addr.set_coarse_x(ppu_reg.ppu_addr.coarse_x()+1);
+            ppu_reg
+                .ppu_addr
+                .set_coarse_x(ppu_reg.ppu_addr.coarse_x() + 1);
         }
     }
 
@@ -594,13 +598,13 @@ pub mod ppu {
 
         let mut buf_ind = 0;
         let fine_x = ppu_reg.fine_x_scroll as usize;
+        let tile_y = ppu_reg.ppu_addr.coarse_y() as u16;
 
         let mut fill_color = |tile_nums: usize, pixel_start: usize, pixel_end: usize| {
             if pixel_end == pixel_start {
                 return;
             }
             let tile_x = ppu_reg.ppu_addr.coarse_x() as u16;
-            let tile_y = ppu_reg.ppu_addr.coarse_y() as u16;    
             let color_h2bit = calc_color_h2bit(tile_x, tile_y, ppu_mem);
 
             for _ in 0..tile_nums {
@@ -619,7 +623,7 @@ pub mod ppu {
                 }
             }
         };
-       
+
         if fine_x == 0 {
             for _ in 0..16 {
                 fill_color(2, 0, 8);
