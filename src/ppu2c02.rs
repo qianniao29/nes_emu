@@ -487,43 +487,14 @@ pub mod ppu {
             .set_name_tbl_y(ppu_reg.ppu_addr_tmp.name_tbl_y());
     }
 
-    pub fn check_sprint0(
-        ppu_reg: &Register,
-        ppu_mem: &mut MemMap,
-        sprite0_buf: &mut [u8],
-    ) -> (u16, u16) {
-        let sprite = Sprite::new(&ppu_mem.oam[0..4]);
-        if sprite.pos_y >= 239 {
-            return (sprite.pos_x as u16, sprite.pos_y as u16);
-        }
-        let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
-        let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
-        let mut offset1 = offset0 + 8;
-
-        let y_range = if sprite.attr.v() {
-            (0..8).rev().map(|n| n).collect::<Vec<_>>()
-        } else {
-            (0..8).map(|n| n).collect::<Vec<_>>()
-        };
-        let x_range = if sprite.attr.h() {
-            (0..8).map(|n| n).collect::<Vec<_>>()
-        } else {
-            (0..8).rev().map(|n| n).collect::<Vec<_>>()
-        };
-        for y in y_range {
-            ppu_mem.read(offset0);
-            let name0 = ppu_mem.read(offset0);
-            ppu_mem.read(offset1);
-            let name1 = ppu_mem.read(offset1);
-            for j in &x_range {
+    pub fn check_sprint0(color_indx: &[u8], sprite0_buf: &mut [u8]) {
+        for y in 0..8 {
+            for j in 0..8 {
                 //颜色索引低 2bit 是否为 0，不为 0 的话就是不透明色
-                sprite0_buf[y] |= (((name0 >> j) | (name1 >> j)) & 0x1) << j;
+                sprite0_buf[y] |=
+                    (((color_indx[y * 8 + j]) | (color_indx[y * 8 + j] >> 1)) & 0x1) << j;
             }
-            offset0 += 1;
-            offset1 += 1;
         }
-
-        (sprite.pos_x as u16, sprite.pos_y as u16)
     }
 
     pub fn check_backgroud(x: usize, color_indx: &[u8]) -> u8 {
@@ -536,20 +507,17 @@ pub mod ppu {
     }
 
     pub fn check_sprite_overflow(ppu_reg: &Register, ppu_mem: &MemMap) -> u16 {
-        if ppu_reg.mask.bg() == false && ppu_reg.mask.s() == false {
-            return 0xffff;
-        }
         let mut cnt_map: AHashMap<u8, u8> = AHashMap::new();
         let height = if ppu_reg.ctrl.h() { 16 } else { 8 };
 
-        let mut pos_y: u8;
+        let mut pos_y: u16;
         for i in 0..64 {
             for j in 0..height {
-                pos_y = ppu_mem.oam[4 * i] + j;
-                if (pos_y < 8) || (pos_y > 240) {
+                pos_y = ppu_mem.oam[4 * i] as u16 + j;
+                if pos_y > 240 {
                     continue;
                 }
-                let cnt = cnt_map.entry(pos_y).or_insert(1);
+                let cnt = cnt_map.entry(pos_y as u8).or_insert(1);
                 *cnt = *cnt + 1;
                 if *cnt > 8 {
                     return pos_y as u16;
@@ -643,14 +611,12 @@ pub mod ppu {
         ppu_reg: &Register,
         ppu_mem: &mut MemMap,
         color_indx: &mut [u8],
-    ) -> (u16, u16) {
+    ) -> (u16, u16, bool) {
         let sprite = Sprite::new(&ppu_mem.oam[sprite_id as usize * 4..sprite_id as usize * 4 + 4]);
-        if sprite.pos_y >= 0xef {
-            return (sprite.pos_x as u16, sprite.pos_y as u16);
+        if sprite.pos_y > 0xef || sprite.attr.p() {
+            return (sprite.pos_x as u16, sprite.pos_y as u16, false);
         }
-        if sprite.attr.p() {
-            return (255, 255);
-        }
+
         let h2bit = sprite.attr.h2bit() << 2;
         let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
         let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
@@ -684,6 +650,6 @@ pub mod ppu {
             offset1 += 1;
         }
 
-        (sprite.pos_x as u16, sprite.pos_y as u16)
+        (sprite.pos_x as u16, sprite.pos_y as u16, true)
     }
 }

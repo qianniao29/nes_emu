@@ -11,6 +11,7 @@ mod input;
 mod ppu2c02;
 mod rom_fs;
 
+use ahash::AHashMap;
 use std::cell::RefCell;
 use std::env;
 use std::rc::Rc;
@@ -70,11 +71,9 @@ fn main() -> Result<(), error::CustomError> {
     let mut master_cycles: u32;
     let mut sprite0_check_buf = [0_u8; 8];
     let mut is_odd_frame = false;
-
+    let (mut sprite0_x, mut sprite0_y) = (0xff, 0xff);
+    let mut sprite_ov_line = 0xffff;
     'running: loop {
-        let (sprite0_x, sprite0_y) =
-            ppu::check_sprint0(&mem.ppu_reg, &mut mem.ppu_mem, &mut sprite0_check_buf);
-        let sprite_ov_line = ppu::check_sprite_overflow(&mem.ppu_reg, &mem.ppu_mem);
         // if sprite_ov_line != 0xffff {
         //     println!("sprite_ov_line={}", sprite_ov_line);
         // }
@@ -156,22 +155,50 @@ fn main() -> Result<(), error::CustomError> {
             ppu::cpoy_y_from_t_to_v(&mut mem.ppu_reg);
         }
 
-        if mem.ppu_reg.mask.s() {
+        sprite_ov_line = 0xffff;
+        // if mem.ppu_reg.mask.s()
+        {
+            let mut cnt_map: AHashMap<u8, u8> = AHashMap::new();
+            let mut sprite_ov_first: u8 = 0;
+            let sprite_height = if mem.ppu_reg.ctrl.h() { 16 } else { 8 };
+            let mut is_present;
+
             // genert sprite platette data
             disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
             for id in (0..64).rev() {
-                let (x, y) = ppu::render_sprite(
+                (sprite0_x, sprite0_y, is_present) = ppu::render_sprite(
                     id,
                     &mem.ppu_reg,
                     &mut mem.ppu_mem,
                     &mut disp.scanline_color_indx,
                 );
-                if y >= 0xef {
+                //check overflow
+                if mem.ppu_reg.mask.bg() || mem.ppu_reg.mask.s() {
+                    for j in 0..sprite_height {
+                        let tmp_y = sprite0_y + j;
+                        if tmp_y > 0xef {
+                            break;
+                        }
+                        let cnt = cnt_map.entry(tmp_y as u8).or_insert(0);
+                        *cnt = *cnt + 1;
+                        if sprite_ov_first == 0 && *cnt > 8 {
+                            sprite_ov_line = tmp_y;
+                            sprite_ov_first = 1;
+                        }
+                    }
+                }
+
+                if is_present == false || mem.ppu_reg.mask.s() == false {
                     continue;
                 }
-                disp.draw_sprite(x, y);
+                disp.draw_sprite(sprite0_x, sprite0_y);
+            }
+            if mem.ppu_reg.mask.bg() {
+                sprite0_check_buf = [0_u8; 8];
+                ppu::check_sprint0(&disp.scanline_color_indx, &mut sprite0_check_buf);
             }
         }
+
         disp.display_present();
         is_odd_frame = !is_odd_frame;
 
