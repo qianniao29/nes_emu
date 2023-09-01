@@ -69,42 +69,58 @@ fn main() -> Result<(), error::CustomError> {
 
     let mut cpu_cycles_end;
     let mut master_cycles: u32;
-    let mut sprite0_check_buf = [0_u8; 8];
+    let mut sprite0_check_buf;
     let mut is_odd_frame = false;
-    let (mut sprite0_x, mut sprite0_y) = (0xff, 0xff);
-    let mut sprite_ov_line = 0xffff;
     'running: loop {
-        // if sprite_ov_line != 0xffff {
-        //     println!("sprite_ov_line={}", sprite_ov_line);
-        // }
         master_cycles = 0;
         cpu::cpu_cycles_reset();
         disp.scanline_color_indx = [0; 256];
+        let (mut sprite0_x, mut sprite0_y) = (0xff, 0xff);
+        
+        sprite0_check_buf = [0_u8; 8];
+        if mem.ppu_reg.mask.s() {
+            (sprite0_x, sprite0_y) =
+                ppu::check_sprint0(&mem.ppu_reg, &mut mem.ppu_mem, &mut sprite0_check_buf);
+        }
 
         /*------------Visible scanlines------------*/
         for j in 0..240 {
             if mem.ppu_reg.mask.bg() {
-                ppu::render_scanline(
+                // render background
+                ppu::render_bg_scanline(
                     &mut mem.ppu_reg,
                     &mut mem.ppu_mem,
                     &mut disp.scanline_color_indx,
                 );
                 //genert bg platette data
                 disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[0..16]);
-                disp.draw_scanline(j);
-
-                // sprite0 hit
-                if (mem.ppu_reg.status.s() == false) && (j >= sprite0_y) && (j < sprite0_y + 8) {
-                    let check_bg =
-                        ppu::check_backgroud(sprite0_x as usize, &disp.scanline_color_indx);
-                    if sprite0_check_buf[0] & check_bg != 0 {
-                        mem.ppu_reg.status.set_s(true);
+                disp.draw_bg_scanline(j);
+                if mem.ppu_reg.mask.s() {
+                    // sprite0 hit
+                    if (mem.ppu_reg.status.s() == false) && (j >= sprite0_y) && (j < sprite0_y + 8)
+                    {
+                        let check_bg =
+                            ppu::check_backgroud(sprite0_x as usize, &disp.scanline_color_indx);
+                        if sprite0_check_buf[0] & check_bg != 0 {
+                            mem.ppu_reg.status.set_s(true);
+                        }
                     }
                 }
             }
-            if sprite_ov_line == j {
-                mem.ppu_reg.status.set_o(true);
+            //render sprite
+            disp.scanline_color_indx = [0; 256];
+            ppu::render_sprite_scanline(
+                j,
+                &mut mem.ppu_reg,
+                &mut mem.ppu_mem,
+                &mut disp.scanline_color_indx,
+            );
+            if mem.ppu_reg.mask.s() {
+                //genert bg platette data
+                disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
+                disp.draw_sprite_scanline(j);
             }
+
             // execute code in one scanline cycles
             master_cycles += dis_std.master_cycles_scanline as u32;
             cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
@@ -153,50 +169,6 @@ fn main() -> Result<(), error::CustomError> {
 
         if mem.ppu_reg.mask.bg() {
             ppu::cpoy_y_from_t_to_v(&mut mem.ppu_reg);
-        }
-
-        sprite_ov_line = 0xffff;
-        // if mem.ppu_reg.mask.s()
-        {
-            let mut cnt_map: AHashMap<u8, u8> = AHashMap::new();
-            let mut sprite_ov_first: u8 = 0;
-            let sprite_height = if mem.ppu_reg.ctrl.h() { 16 } else { 8 };
-            let mut is_present;
-
-            // genert sprite platette data
-            disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
-            for id in (0..64).rev() {
-                (sprite0_x, sprite0_y, is_present) = ppu::render_sprite(
-                    id,
-                    &mem.ppu_reg,
-                    &mut mem.ppu_mem,
-                    &mut disp.scanline_color_indx,
-                );
-                //check overflow
-                if mem.ppu_reg.mask.bg() || mem.ppu_reg.mask.s() {
-                    for j in 0..sprite_height {
-                        let tmp_y = sprite0_y + j;
-                        if tmp_y > 0xef {
-                            break;
-                        }
-                        let cnt = cnt_map.entry(tmp_y as u8).or_insert(0);
-                        *cnt = *cnt + 1;
-                        if sprite_ov_first == 0 && *cnt > 8 {
-                            sprite_ov_line = tmp_y;
-                            sprite_ov_first = 1;
-                        }
-                    }
-                }
-
-                if is_present == false || mem.ppu_reg.mask.s() == false {
-                    continue;
-                }
-                disp.draw_sprite(sprite0_x, sprite0_y);
-            }
-            if mem.ppu_reg.mask.bg() {
-                sprite0_check_buf = [0_u8; 8];
-                ppu::check_sprint0(&disp.scanline_color_indx, &mut sprite0_check_buf);
-            }
         }
 
         disp.display_present();

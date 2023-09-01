@@ -3,6 +3,7 @@
 pub mod ppu {
     use ahash::AHashMap;
     use std::cell::RefCell;
+    use std::default;
     use std::rc::Rc;
 
     /*
@@ -22,6 +23,7 @@ pub mod ppu {
         pub palette_indx_tbl: [u8; 0x20],
         pub pseudo_cache: u8,
         pub oam: [u8; 0x100],
+        pub oam2: [Sprite; 8],
     }
 
     impl<'a> MemMap {
@@ -31,6 +33,7 @@ pub mod ppu {
                 palette_indx_tbl: [0; 0x20],
                 pseudo_cache: 0,
                 oam: [0; 0x100],
+                oam2: Default::default(),
             }
         }
 
@@ -406,6 +409,23 @@ pub mod ppu {
                 pos_x: raw[3],
             }
         }
+        pub fn convert_from_slice(&mut self, raw: &[u8]) {
+            self.pos_y = raw[0];
+            self.tile_indx = raw[1];
+            self.attr = SpriteAttribute(raw[2]);
+            self.pos_x = raw[3];
+        }
+    }
+
+    impl Default for Sprite {
+        fn default() -> Self {
+            Sprite {
+                pos_y: 0xff,
+                tile_indx: 0xff,
+                attr: SpriteAttribute(0xff),
+                pos_x: 0xff,
+            }
+        }
     }
 
     // 背景 8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
@@ -487,14 +507,41 @@ pub mod ppu {
             .set_name_tbl_y(ppu_reg.ppu_addr_tmp.name_tbl_y());
     }
 
-    pub fn check_sprint0(color_indx: &[u8], sprite0_buf: &mut [u8]) {
-        for y in 0..8 {
-            for j in 0..8 {
-                //颜色索引低 2bit 是否为 0，不为 0 的话就是不透明色
-                sprite0_buf[y] |=
-                    (((color_indx[y * 8 + j]) | (color_indx[y * 8 + j] >> 1)) & 0x1) << j;
-            }
+    pub fn check_sprint0(
+        ppu_reg: &Register,
+        ppu_mem: &mut MemMap,
+        sprite0_buf: &mut [u8],
+    ) -> (u16, u16) {
+        let sprite = Sprite::new(&ppu_mem.oam[0..4]);
+        if sprite.pos_y >= 239 {
+            return (sprite.pos_x as u16, sprite.pos_y as u16);
         }
+        let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
+        let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
+        let mut offset1 = offset0 + 8;
+
+        let y_range = if sprite.attr.v() {
+            (0..8).rev().map(|n| n).collect::<Vec<_>>()
+        } else {
+            (0..8).map(|n| n).collect::<Vec<_>>()
+        };
+        let x_range = if sprite.attr.h() {
+            (0..8).map(|n| n).collect::<Vec<_>>()
+        } else {
+            (0..8).rev().map(|n| n).collect::<Vec<_>>()
+        };
+        for y in y_range {
+            let pattern0 = ppu_mem.read_direct(offset0);
+            let pattern1 = ppu_mem.read_direct(offset1);
+            for j in &x_range {
+                //颜色索引低 2bit 是否为 0，不为 0 的话就是不透明色
+                sprite0_buf[y] |= (pattern0 | pattern1) & (0x1 << j);
+            }
+            offset0 += 1;
+            offset1 += 1;
+        }
+
+        (sprite.pos_x as u16, sprite.pos_y as u16)
     }
 
     pub fn check_backgroud(x: usize, color_indx: &[u8]) -> u8 {
@@ -558,7 +605,7 @@ pub mod ppu {
         }
     }
 
-    pub fn render_scanline(ppu_reg: &mut Register, ppu_mem: &MemMap, color_indx: &mut [u8]) {
+    pub fn render_bg_scanline(ppu_reg: &mut Register, ppu_mem: &MemMap, color_indx: &mut [u8]) {
         // if ppu_reg.mask.bg() == false {
         //     //TODO: 放在函数外的循环前面？
         //     return;
@@ -651,5 +698,80 @@ pub mod ppu {
         }
 
         (sprite.pos_x as u16, sprite.pos_y as u16, true)
+    }
+
+    pub fn render_sprite_scanline(
+        y: u16,
+        ppu_reg: &mut Register,
+        ppu_mem: &mut MemMap,
+        color_indx: &mut [u8],
+    ) {
+        if (ppu_reg.mask.bg() == false) && (ppu_reg.mask.s() == false) {
+            return;
+        }
+        let line = y as u8;
+        let mut count = 0;
+        let mut m = 0;
+        let height = if ppu_reg.ctrl.h() { 16 } else { 8 };
+
+        ppu_mem.oam2 = Default::default();
+        for n in 0..64 {
+            let sprite = &ppu_mem.oam[n * 4..n * 4 + 4];
+
+            if (sprite[m] <= line) && (line < (sprite[m] + height)) {
+                if count < 8 {
+                    ppu_mem.oam2[count].convert_from_slice(sprite);
+                } else {
+                    //set overflow
+                    ppu_reg.status.set_o(true);
+                    m = (m + 4) & 0x3;
+                }
+                count += 1;
+            } else if count >= 8 {
+                m = (m + 1) & 0x3;
+            }
+        }
+        if ppu_reg.mask.s() == false {
+            return;
+        }
+        if count > 8 {
+            count = 8
+        }
+        for i in (0..count).rev() {
+            let sprite = &ppu_mem.oam2[i];
+            if sprite.attr.p() {
+                continue;
+            }
+
+            let h2bit = sprite.attr.h2bit() << 2;
+            let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
+            let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
+
+            if sprite.attr.v() {
+                offset0 += 8 - (line - sprite.pos_y) as u16;
+            } else {
+                offset0 += (line - sprite.pos_y) as u16;
+            };
+            let offset1 = offset0 + 8;
+
+            let x_range = if sprite.attr.h() {
+                (0..8).map(|n| n).collect::<Vec<_>>()
+            } else {
+                (0..8).rev().map(|n| n).collect::<Vec<_>>()
+            };
+
+            let line_color_indx =
+                &mut color_indx[(sprite.tile_indx as usize)..((sprite.tile_indx as usize) + 8)];
+            let pattern0 = ppu_mem.read_direct(offset0);
+            let pattern1 = ppu_mem.read_direct(offset1);
+            let mut n = 0;
+            for j in &x_range {
+                //颜色索引高 2bit
+                line_color_indx[n] = h2bit;
+                //颜色索引低 2bit
+                line_color_indx[n] |= ((pattern0 >> j) & 0x1) | (((pattern1 >> j) & 0x1) << 1);
+                n += 1;
+            }
+        }
     }
 }

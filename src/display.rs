@@ -29,9 +29,10 @@ pub mod disp {
 
     pub trait DisplayFunc<T, M> {
         fn generate_palette_data(&mut self, palette_indx_tbl: &[u8]);
-        fn draw_tile(&mut self, x: u16, y: u16);
-        fn draw_scanline(&mut self, y: u16);
+        fn draw_bg_tile(&mut self, x: u16, y: u16);
+        fn draw_bg_scanline(&mut self, y: u16);
         fn draw_sprite(&mut self, x: u16, y: u16);
+        fn draw_sprite_scanline(&mut self, y: u16);
         fn display_present(&mut self);
     }
 

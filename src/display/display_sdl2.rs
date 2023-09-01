@@ -62,7 +62,7 @@ pub mod disp_sdl2 {
                 self.palette_data[i] = PLALETTE_STD_DATA[palette_indx_tbl[i] as usize];
             }
         }
-        fn draw_tile(&mut self, x: u16, y: u16) {
+        fn draw_bg_tile(&mut self, x: u16, y: u16) {
             self.dev
                 .texture
                 .with_lock(None, |buffer: &mut [u8], pitch: usize| {
@@ -82,7 +82,7 @@ pub mod disp_sdl2 {
                 .copy(&self.dev.texture, None, Rect::new(x.into(), y.into(), 8, 8))
                 .unwrap();
         }
-        fn draw_scanline(&mut self, y: u16) {
+        fn draw_bg_scanline(&mut self, y: u16) {
             self.dev
                 .texture
                 .with_lock(None, |buffer: &mut [u8], _| {
@@ -118,6 +118,21 @@ pub mod disp_sdl2 {
                         .draw_point((x as i32 + i as i32, y as i32 + j as i32))
                         .unwrap();
                 }
+            }
+        }
+        fn draw_sprite_scanline(&mut self, y: u16) {
+            for i in 0..256 {
+                let color_indx = self.scanline_color_indx[i] as usize;
+                if color_indx & 3 == 0 {
+                    continue;
+                } // 透明色精灵，保持背景色不变
+                self.dev.canvas.set_draw_color(Color::RGBA(
+                    self.palette_data[color_indx][1],
+                    self.palette_data[color_indx][2],
+                    self.palette_data[color_indx][3],
+                    self.palette_data[color_indx][0],
+                ));
+                self.dev.canvas.draw_point((i as i32, y as i32)).unwrap();
             }
         }
         fn display_present(&mut self) {
