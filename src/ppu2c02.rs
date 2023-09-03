@@ -403,14 +403,14 @@ pub mod ppu {
     impl Sprite {
         pub fn new(raw: &[u8]) -> Self {
             Self {
-                pos_y: raw[0],
+                pos_y: raw[0] + 1, //actually, sprite y is sprite[0] + 1
                 tile_indx: raw[1],
                 attr: SpriteAttribute(raw[2]),
                 pos_x: raw[3],
             }
         }
         pub fn convert_from_slice(&mut self, raw: &[u8]) {
-            self.pos_y = raw[0];
+            self.pos_y = raw[0] + 1; //actually, sprite y is sprite[0] + 1
             self.tile_indx = raw[1];
             self.attr = SpriteAttribute(raw[2]);
             self.pos_x = raw[3];
@@ -507,7 +507,7 @@ pub mod ppu {
             .set_name_tbl_y(ppu_reg.ppu_addr_tmp.name_tbl_y());
     }
 
-    pub fn check_sprint0(
+    pub fn get_sprint0(
         ppu_reg: &Register,
         ppu_mem: &mut MemMap,
         sprite0_buf: &mut [u8],
@@ -542,6 +542,30 @@ pub mod ppu {
         }
 
         (sprite.pos_x as u16, sprite.pos_y as u16)
+    }
+
+    pub fn check_sprint0_hit(
+        y: u16,
+        sprite0_x: u16,
+        sprite0_y: u16,
+        ppu_reg: &mut Register,
+        sprite0_buf: &[u8],
+        bg_color_indx: &[u8],
+    ) -> bool {
+        if ppu_reg.mask.s() {
+            if (ppu_reg.status.s() == false) && (y >= sprite0_y) && (y < sprite0_y + 8) {
+                if ppu_reg.mask.bm() == false || ppu_reg.mask.sm() == false {
+                    if sprite0_x <= 7 {
+                        return false;
+                    }
+                }
+                let check_bg = check_backgroud(sprite0_x as usize, bg_color_indx);
+                if sprite0_buf[0] & check_bg != 0 {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     pub fn check_backgroud(x: usize, color_indx: &[u8]) -> u8 {
@@ -706,6 +730,9 @@ pub mod ppu {
         ppu_mem: &mut MemMap,
         color_indx: &mut [u8],
     ) {
+        if y >= 0xef {
+            return;
+        }
         if (ppu_reg.mask.bg() == false) && (ppu_reg.mask.s() == false) {
             return;
         }
@@ -717,8 +744,8 @@ pub mod ppu {
         ppu_mem.oam2 = Default::default();
         for n in 0..64 {
             let sprite = &ppu_mem.oam[n * 4..n * 4 + 4];
-
-            if (sprite[m] <= line) && (line < (sprite[m] + height)) {
+            //actually, sprite y is sprite[m] + 1
+            if (sprite[m] < line) && (line < (sprite[m] + height + 1)) {
                 if count < 8 {
                     ppu_mem.oam2[count].convert_from_slice(sprite);
                 } else {
@@ -744,15 +771,25 @@ pub mod ppu {
             }
 
             let h2bit = sprite.attr.h2bit() << 2;
-            let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
-            let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
+            let mut tile = sprite.tile_indx as u16;
+            let mut base = 0;
+            if ppu_reg.ctrl.h() {
+                if tile & 0x1 == 0x00 {
+                    base = 0x1000_u16;
+                }
+                tile &= 0xfe;
+            } else {
+                if ppu_reg.ctrl.s() {
+                    base = 0x1000_u16;
+                }
+            }
+            let mut offset0 = (tile * (height as u16 * 2)) + base;
 
             if sprite.attr.v() {
-                offset0 += 8 - (line - sprite.pos_y) as u16;
+                offset0 += height as u16 - (line - sprite.pos_y) as u16;
             } else {
                 offset0 += (line - sprite.pos_y) as u16;
             };
-            let offset1 = offset0 + 8;
 
             let x_range = if sprite.attr.h() {
                 (0..8).map(|n| n).collect::<Vec<_>>()
@@ -760,10 +797,9 @@ pub mod ppu {
                 (0..8).rev().map(|n| n).collect::<Vec<_>>()
             };
 
-            let line_color_indx =
-                &mut color_indx[(sprite.tile_indx as usize)..((sprite.tile_indx as usize) + 8)];
+            let line_color_indx = &mut color_indx[sprite.pos_x as usize..(sprite.pos_x as usize + 8)];
             let pattern0 = ppu_mem.read_direct(offset0);
-            let pattern1 = ppu_mem.read_direct(offset1);
+            let pattern1 = ppu_mem.read_direct(offset0 + height as u16);
             let mut n = 0;
             for j in &x_range {
                 //颜色索引高 2bit

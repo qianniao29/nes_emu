@@ -82,11 +82,11 @@ pub mod disp_sdl2 {
                 .copy(&self.dev.texture, None, Rect::new(x.into(), y.into(), 8, 8))
                 .unwrap();
         }
-        fn draw_bg_scanline(&mut self, y: u16) {
+        fn draw_bg_scanline(&mut self, x: u16, y: u16) {
             self.dev
                 .texture
                 .with_lock(None, |buffer: &mut [u8], _| {
-                    for i in 0..256 {
+                    for i in x as usize..256 {
                         let offset = i * 4;
                         let color_indx = self.scanline_color_indx[i] as usize;
                         buffer[offset..offset + 4]
@@ -96,7 +96,11 @@ pub mod disp_sdl2 {
                 .unwrap();
             self.dev
                 .canvas
-                .copy(&self.dev.texture, None, Rect::new(0, y.into(), 256, 1))
+                .copy(
+                    &self.dev.texture,
+                    None,
+                    Rect::new(x.into(), y.into(), 256 - x as u32, 1),
+                )
                 .unwrap();
         }
         fn draw_sprite(&mut self, x: u16, y: u16) {
@@ -120,8 +124,8 @@ pub mod disp_sdl2 {
                 }
             }
         }
-        fn draw_sprite_scanline(&mut self, y: u16) {
-            for i in 0..256 {
+        fn draw_sprite_scanline(&mut self, x: u16, y: u16) {
+            for i in x as usize..256 {
                 let color_indx = self.scanline_color_indx[i] as usize;
                 if color_indx & 3 == 0 {
                     continue;
