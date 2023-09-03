@@ -118,7 +118,8 @@ fn main() -> Result<(), error::CustomError> {
             if mem.ppu_reg.mask.s() {
                 //genert bg platette data
                 disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
-                disp.draw_sprite_scanline(if mem.ppu_reg.mask.sm() { 0 } else { 8 }, j);
+                //actually, sprite y is + 1
+                disp.draw_sprite_scanline(if mem.ppu_reg.mask.sm() { 0 } else { 8 }, j + 1);
             }
 
             // execute code in one scanline cycles
@@ -134,10 +135,13 @@ fn main() -> Result<(), error::CustomError> {
                 if sprite0_should_hit {
                     let cyc_indx = cpu::get_cpu_cycles() - snapshot_cyc;
                     if !(mem.ppu_reg.mask.bm() | mem.ppu_reg.mask.sm()) {
-                        if (cyc_indx >= 9 / 3) && (cyc_indx >= sprite0_x as u32 / 3) {
+                        if (cyc_indx >= 9 / 3)
+                            && (cyc_indx >= sprite0_x as u32 / 3)
+                            && (cyc_indx < 258 / 3)
+                        {
                             mem.ppu_reg.status.set_s(true);
                         }
-                    } else if cyc_indx >= sprite0_x as u32 / 3 {
+                    } else if (cyc_indx >= sprite0_x as u32 / 3) && (cyc_indx < 258 / 3) {
                         mem.ppu_reg.status.set_s(true);
                     }
                 }

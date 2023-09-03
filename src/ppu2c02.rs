@@ -403,14 +403,14 @@ pub mod ppu {
     impl Sprite {
         pub fn new(raw: &[u8]) -> Self {
             Self {
-                pos_y: raw[0] + 1, //actually, sprite y is sprite[0] + 1
+                pos_y: raw[0], //actually display, sprite y is sprite[0] + 1
                 tile_indx: raw[1],
                 attr: SpriteAttribute(raw[2]),
                 pos_x: raw[3],
             }
         }
         pub fn convert_from_slice(&mut self, raw: &[u8]) {
-            self.pos_y = raw[0] + 1; //actually, sprite y is sprite[0] + 1
+            self.pos_y = raw[0]; //actually display, sprite y is sprite[0] + 1
             self.tile_indx = raw[1];
             self.attr = SpriteAttribute(raw[2]);
             self.pos_x = raw[3];
@@ -516,14 +516,25 @@ pub mod ppu {
         if sprite.pos_y >= 239 {
             return (sprite.pos_x as u16, sprite.pos_y as u16);
         }
-        let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
-        let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
-        let mut offset1 = offset0 + 8;
+        let height = if ppu_reg.ctrl.h() { 16 } else { 8 };
+        let mut tile = sprite.tile_indx as u16;
+        let mut base = 0;
+        if ppu_reg.ctrl.h() {
+            if tile & 0x1 == 0x00 {
+                base = 0x1000_u16;
+            }
+            tile &= 0xfe;
+        } else {
+            if ppu_reg.ctrl.s() {
+                base = 0x1000_u16;
+            }
+        }
+        let mut offset0 = (tile * (height as u16 * 2)) + base;
 
         let y_range = if sprite.attr.v() {
-            (0..8).rev().map(|n| n).collect::<Vec<_>>()
+            (0..height).rev().map(|n| n).collect::<Vec<_>>()
         } else {
-            (0..8).map(|n| n).collect::<Vec<_>>()
+            (0..height).map(|n| n).collect::<Vec<_>>()
         };
         let x_range = if sprite.attr.h() {
             (0..8).map(|n| n).collect::<Vec<_>>()
@@ -532,13 +543,12 @@ pub mod ppu {
         };
         for y in y_range {
             let pattern0 = ppu_mem.read_direct(offset0);
-            let pattern1 = ppu_mem.read_direct(offset1);
+            let pattern1 = ppu_mem.read_direct(offset0 + 8);
             for j in &x_range {
                 //颜色索引低 2bit 是否为 0，不为 0 的话就是不透明色
                 sprite0_buf[y] |= (pattern0 | pattern1) & (0x1 << j);
             }
             offset0 += 1;
-            offset1 += 1;
         }
 
         (sprite.pos_x as u16, sprite.pos_y as u16)
@@ -730,7 +740,7 @@ pub mod ppu {
         ppu_mem: &mut MemMap,
         color_indx: &mut [u8],
     ) {
-        if y >= 0xef {
+        if y > 0xef {
             return;
         }
         if (ppu_reg.mask.bg() == false) && (ppu_reg.mask.s() == false) {
@@ -744,8 +754,8 @@ pub mod ppu {
         ppu_mem.oam2 = Default::default();
         for n in 0..64 {
             let sprite = &ppu_mem.oam[n * 4..n * 4 + 4];
-            //actually, sprite y is sprite[m] + 1
-            if (sprite[m] < line) && (line < (sprite[m] + height + 1)) {
+
+            if (sprite[m] <= line) && (line < (sprite[m] + height)) {
                 if count < 8 {
                     ppu_mem.oam2[count].convert_from_slice(sprite);
                 } else {
@@ -786,7 +796,7 @@ pub mod ppu {
             let mut offset0 = (tile * (height as u16 * 2)) + base;
 
             if sprite.attr.v() {
-                offset0 += height as u16 - (line - sprite.pos_y) as u16;
+                offset0 += height as u16 - 1 - (line - sprite.pos_y) as u16;
             } else {
                 offset0 += (line - sprite.pos_y) as u16;
             };
@@ -797,7 +807,8 @@ pub mod ppu {
                 (0..8).rev().map(|n| n).collect::<Vec<_>>()
             };
 
-            let line_color_indx = &mut color_indx[sprite.pos_x as usize..(sprite.pos_x as usize + 8)];
+            let line_color_indx =
+                &mut color_indx[sprite.pos_x as usize..(sprite.pos_x as usize + 8)];
             let pattern0 = ppu_mem.read_direct(offset0);
             let pattern1 = ppu_mem.read_direct(offset0 + height as u16);
             let mut n = 0;
