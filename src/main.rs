@@ -76,9 +76,9 @@ fn main() -> Result<(), error::CustomError> {
         cpu::cpu_cycles_reset();
         disp.scanline_color_indx = [0; 256];
         let (mut sprite0_x, mut sprite0_y) = (0xff, 0xff);
-        let mut sprite0_should_hit = false;
+        let mut sprite0_should_hit;
 
-        sprite0_check_buf = [0_u8; 8];
+        sprite0_check_buf = [0_u8; 16];
         if mem.ppu_reg.mask.s() && mem.ppu_reg.mask.bg() {
             (sprite0_x, sprite0_y) =
                 ppu::get_sprint0(&mem.ppu_reg, &mut mem.ppu_mem, &mut sprite0_check_buf);
@@ -96,7 +96,28 @@ fn main() -> Result<(), error::CustomError> {
                 //genert bg platette data
                 disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[0..16]);
                 disp.draw_bg_scanline(if mem.ppu_reg.mask.bm() { 0 } else { 8 }, j);
-                //check sprite0 hiting
+            }
+
+            // execute code in one scanline cycles
+            master_cycles += dis_std.master_cycles_scanline as u32;
+            cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
+            if j == 0 && is_odd_frame {
+                cpu_cycles_end -= 3;
+            }
+            while cpu::get_cpu_cycles() < cpu_cycles_end {
+                cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
+            }
+
+            //dot 256, 257
+            if mem.ppu_reg.mask.bg() {
+                ppu::coarse_y_wrapping(&mut mem.ppu_reg);
+                ppu::cpoy_x_from_t_to_v(&mut mem.ppu_reg);
+            }
+            //sync horizon
+
+            //check sprite0 hiting
+            sprite0_should_hit = false;
+            if mem.ppu_reg.mask.bg() {
                 sprite0_should_hit = ppu::check_sprint0_hit(
                     j,
                     sprite0_x,
@@ -106,9 +127,11 @@ fn main() -> Result<(), error::CustomError> {
                     &disp.scanline_color_indx,
                 );
             }
+            if sprite0_should_hit {
+                mem.ppu_reg.status.set_s(true);
+            }
 
             //render sprite
-            disp.scanline_color_indx = [0; 256];
             ppu::render_sprite_scanline(
                 j,
                 &mut mem.ppu_reg,
@@ -119,39 +142,8 @@ fn main() -> Result<(), error::CustomError> {
                 //genert bg platette data
                 disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
                 //actually, sprite y is + 1
-                disp.draw_sprite_scanline(if mem.ppu_reg.mask.sm() { 0 } else { 8 }, j + 1);
+                disp.draw_sprite_scanline(if mem.ppu_reg.mask.sm() { 0 } else { 8 }, j);
             }
-
-            // execute code in one scanline cycles
-            master_cycles += dis_std.master_cycles_scanline as u32;
-            cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-            if j == 0 && is_odd_frame {
-                cpu_cycles_end -= 3;
-            }
-            let snapshot_cyc = cpu::get_cpu_cycles();
-            while cpu::get_cpu_cycles() < cpu_cycles_end {
-                cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
-                // sprite0 hit
-                if sprite0_should_hit {
-                    let cyc_indx = cpu::get_cpu_cycles() - snapshot_cyc;
-                    if !(mem.ppu_reg.mask.bm() | mem.ppu_reg.mask.sm()) {
-                        if (cyc_indx >= 9 / 3)
-                            && (cyc_indx >= sprite0_x as u32 / 3)
-                            && (cyc_indx < 258 / 3)
-                        {
-                            mem.ppu_reg.status.set_s(true);
-                        }
-                    } else if (cyc_indx >= sprite0_x as u32 / 3) && (cyc_indx < 258 / 3) {
-                        mem.ppu_reg.status.set_s(true);
-                    }
-                }
-            }
-            //dot 256, 257
-            if mem.ppu_reg.mask.bg() {
-                ppu::coarse_y_wrapping(&mut mem.ppu_reg);
-                ppu::cpoy_x_from_t_to_v(&mut mem.ppu_reg);
-            }
-            //sync horizon
         }
 
         /*---------Post-render scanline-------*/
@@ -194,7 +186,7 @@ fn main() -> Result<(), error::CustomError> {
             break 'running;
         }
 
-        ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+        // ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
     }
 
     Ok(())

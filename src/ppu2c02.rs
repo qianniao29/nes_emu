@@ -513,40 +513,51 @@ pub mod ppu {
         sprite0_buf: &mut [u8],
     ) -> (u16, u16) {
         let sprite = Sprite::new(&ppu_mem.oam[0..4]);
-        if sprite.pos_y >= 239 {
+        if sprite.pos_y >= 239 || sprite.pos_x == 255 {
             return (sprite.pos_x as u16, sprite.pos_y as u16);
         }
-        let height = if ppu_reg.ctrl.h() { 16 } else { 8 };
+        let height;
         let mut tile = sprite.tile_indx as u16;
         let mut base = 0;
         if ppu_reg.ctrl.h() {
-            if tile & 0x1 == 0x00 {
+            height = 16;
+            if tile & 0x1 != 0x00 {
                 base = 0x1000_u16;
             }
+            //Tile number of top of sprite (0 to 254; bottom half gets the next tile)
             tile &= 0xfe;
         } else {
+            height = 8;
             if ppu_reg.ctrl.s() {
                 base = 0x1000_u16;
             }
         }
-        let mut offset0 = (tile * (height as u16 * 2)) + base;
+        let mut offset0 = (tile << 4) + base;
 
         let y_range = if sprite.attr.v() {
-            (0..height).rev().map(|n| n).collect::<Vec<_>>()
+            (0..height as usize).rev().map(|n| n).collect::<Vec<_>>()
         } else {
-            (0..height).map(|n| n).collect::<Vec<_>>()
+            (0..height as usize).map(|n| n).collect::<Vec<_>>()
+        };
+        let x_count = if sprite.pos_x > 248 {
+            255 - sprite.pos_x + 1
+        } else {
+            8
         };
         let x_range = if sprite.attr.h() {
             (0..8).map(|n| n).collect::<Vec<_>>()
         } else {
             (0..8).rev().map(|n| n).collect::<Vec<_>>()
         };
-        for y in y_range {
-            let pattern0 = ppu_mem.read_direct(offset0);
-            let pattern1 = ppu_mem.read_direct(offset0 + 8);
-            for j in &x_range {
+
+        for y in 0..height {
+            //if 8x16 sprites, bottom half gets the next tile
+            let pattern0 = ppu_mem.read_direct(offset0 + (y & 0x8));
+            let pattern1 = ppu_mem.read_direct(offset0 + (y & 0x8) + 8);
+            for j in 0..x_count {
                 //颜色索引低 2bit 是否为 0，不为 0 的话就是不透明色
-                sprite0_buf[y] |= (pattern0 | pattern1) & (0x1 << j);
+                sprite0_buf[y_range[y as usize]] |=
+                    (((pattern0 | pattern1) >> x_range[j as usize]) & 0x1) << j;
             }
             offset0 += 1;
         }
@@ -563,14 +574,27 @@ pub mod ppu {
         bg_color_indx: &[u8],
     ) -> bool {
         if ppu_reg.mask.s() {
-            if (ppu_reg.status.s() == false) && (y >= sprite0_y) && (y < sprite0_y + 8) {
-                if ppu_reg.mask.bm() == false || ppu_reg.mask.sm() == false {
-                    if sprite0_x <= 7 {
+            if sprite0_x == 255 {
+                return false;
+            }
+            let height = if ppu_reg.ctrl.h() { 16 } else { 8 };
+            if (ppu_reg.status.s() == false) && (y > sprite0_y) && (y <= sprite0_y + height) {
+                let check_bg = check_backgroud(sprite0_x as usize, bg_color_indx);
+                let result = sprite0_buf[(y - sprite0_y - 1) as usize] & check_bg;
+
+                if (ppu_reg.mask.bm() == false || ppu_reg.mask.sm() == false) && (sprite0_x <= 7) {
+                    // just judgement inrange 0~7
+                    if result as u16 >> (8 - sprite0_x) == 0 {
                         return false;
                     }
                 }
-                let check_bg = check_backgroud(sprite0_x as usize, bg_color_indx);
-                if sprite0_buf[0] & check_bg != 0 {
+                if sprite0_x >= 248 {
+                    if result & !(1 << (255 - sprite0_x)) != 0 {
+                        return true;
+                    } else {
+                        return false;
+                    }
+                } else if result != 0 {
                     return true;
                 }
             }
@@ -580,8 +604,9 @@ pub mod ppu {
 
     pub fn check_backgroud(x: usize, color_indx: &[u8]) -> u8 {
         let mut check_bg = 0;
+        let x_range_max = if x > 248 { 255 - x + 1 } else { 8 };
 
-        for i in 0..8 {
+        for i in 0..x_range_max {
             check_bg |= ((color_indx[x + i] | (color_indx[x + i] >> 1)) & 0x1) << i;
         }
         check_bg
@@ -761,7 +786,6 @@ pub mod ppu {
                 } else {
                     //set overflow
                     ppu_reg.status.set_o(true);
-                    m = (m + 4) & 0x3;
                 }
                 count += 1;
             } else if count >= 8 {
@@ -776,31 +800,36 @@ pub mod ppu {
         }
         for i in (0..count).rev() {
             let sprite = &ppu_mem.oam2[i];
-            if sprite.attr.p() {
-                continue;
-            }
 
             let h2bit = sprite.attr.h2bit() << 2;
             let mut tile = sprite.tile_indx as u16;
             let mut base = 0;
             if ppu_reg.ctrl.h() {
-                if tile & 0x1 == 0x00 {
+                if tile & 0x1 != 0x00 {
                     base = 0x1000_u16;
                 }
+                //Tile number of top of sprite (0 to 254; bottom half gets the next tile)
                 tile &= 0xfe;
             } else {
                 if ppu_reg.ctrl.s() {
                     base = 0x1000_u16;
                 }
             }
-            let mut offset0 = (tile * (height as u16 * 2)) + base;
+            let mut offset0 = (tile << 4) + base;
+            let t = (line - sprite.pos_y) as u16;
 
             if sprite.attr.v() {
-                offset0 += height as u16 - 1 - (line - sprite.pos_y) as u16;
+                offset0 += height as u16 - 1 - t;
+                offset0 = (offset0 & 0x7) + (offset0 & 0x8) << 2;
             } else {
-                offset0 += (line - sprite.pos_y) as u16;
+                offset0 += (t & 0x7) + (t & 0x8) << 2;
             };
 
+            let x_ount = if sprite.pos_x > 248 {
+                255 - sprite.pos_x + 1
+            } else {
+                8
+            };
             let x_range = if sprite.attr.h() {
                 (0..8).map(|n| n).collect::<Vec<_>>()
             } else {
@@ -808,15 +837,20 @@ pub mod ppu {
             };
 
             let line_color_indx =
-                &mut color_indx[sprite.pos_x as usize..(sprite.pos_x as usize + 8)];
+                &mut color_indx[sprite.pos_x as usize..(sprite.pos_x as usize + x_ount as usize)];
             let pattern0 = ppu_mem.read_direct(offset0);
-            let pattern1 = ppu_mem.read_direct(offset0 + height as u16);
+            let pattern1 = ppu_mem.read_direct(offset0 + 8);
             let mut n = 0;
-            for j in &x_range {
+            for j in 0..x_ount as usize {
+                if sprite.attr.p() && (line_color_indx[n] & 0x3 != 0) {
+                    line_color_indx[n] = 0;
+                    continue;
+                }
                 //颜色索引高 2bit
                 line_color_indx[n] = h2bit;
                 //颜色索引低 2bit
-                line_color_indx[n] |= ((pattern0 >> j) & 0x1) | (((pattern1 >> j) & 0x1) << 1);
+                line_color_indx[n] |=
+                    ((pattern0 >> x_range[j]) & 0x1) | (((pattern1 >> x_range[j]) & 0x1) << 1);
                 n += 1;
             }
         }
