@@ -59,7 +59,9 @@ pub mod disp_sdl2 {
         fn generate_palette_data(&mut self, palette_indx_tbl: &[u8]) {
             //genert platette data
             for i in 0..16 {
-                self.palette_data[i] = PLALETTE_STD_DATA[palette_indx_tbl[i] as usize];
+                /*$3F04/$3F08/$3F0C values are not used by the PPU when normally rendering
+                (since the pattern values that would otherwise select those cells select the backdrop color instead). */
+                self.palette_data[i] = PLALETTE_STD_DATA[palette_indx_tbl[i & 0x3] as usize];
             }
         }
         fn draw_bg_tile(&mut self, x: u16, y: u16) {

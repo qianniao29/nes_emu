@@ -83,11 +83,10 @@ pub mod ppu {
                 let palet_addr: usize = (addr_map & 0x1f).into();
                 if palet_addr & 0x3 != 0 {
                     self.palette_indx_tbl[palet_addr] = data;
-                } else if palet_addr == 0 {
-                    // 全局背景色
-                    for n in [0, 4, 8, 12] {
-                        self.palette_indx_tbl[n] = data;
-                    }
+                } else {
+                    // 全局背景色，Addresses $3F10/$3F14/$3F18/$3F1C are mirrors of $3F00/$3F04/$3F08/$3F0C.
+                    self.palette_indx_tbl[palet_addr] = data;
+                    self.palette_indx_tbl[palet_addr ^ 0x10] = data;
                 }
             }
         }
@@ -637,12 +636,14 @@ pub mod ppu {
     计算所在属性表
     1 个字节控制 4*4=16 个 tile，2bit 控制 2*2=4 个 tile。1 个字节控制 32*32 像素
     */
+    #[inline]
     fn calc_color_h2bit(tile_x: u16, tile_y: u16, ppu_mem: &MemMap) -> u8 {
         let attribute_id = (tile_x >> 2) + (tile_y >> 2) * 8;
         let attr = ppu_mem.read_direct(attribute_id + 960 + 0x2000);
         let shift = ((tile_x & 0x2) + ((tile_y & 0x2) << 1)) as u8; //((pos_x&0x1f)>>4 + (pos_y&0x1f)>>4*2)*2;
         ((attr >> shift) & 0x3) << 2
     }
+    #[inline]
     fn calc_pattern(ppu_reg: &Register, ppu_mem: &MemMap) -> u16 {
         let name_tbl_addr = 0x2000 | (ppu_reg.ppu_addr.0 & 0xfff); //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
         let base = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
@@ -651,6 +652,7 @@ pub mod ppu {
         pattern_addr <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
         pattern_addr + base + ppu_reg.ppu_addr.fine_y() as u16
     }
+    #[inline]
     fn coarse_x_wrapping(ppu_reg: &mut Register) {
         if ppu_reg.ppu_addr.coarse_x() >= 31 {
             ppu_reg.ppu_addr.set_coarse_x(0);
@@ -665,11 +667,6 @@ pub mod ppu {
     }
 
     pub fn render_bg_scanline(ppu_reg: &mut Register, ppu_mem: &MemMap, color_indx: &mut [u8]) {
-        // if ppu_reg.mask.bg() == false {
-        //     //TODO: 放在函数外的循环前面？
-        //     return;
-        // }
-
         let mut buf_ind = 0;
         let fine_x = ppu_reg.fine_x_scroll as usize;
         let tile_y = ppu_reg.ppu_addr.coarse_y() as u16;
@@ -798,6 +795,7 @@ pub mod ppu {
         if count > 8 {
             count = 8
         }
+        let mut sprite_line = [0_u8; 256];
         for i in (0..count).rev() {
             let sprite = &ppu_mem.oam2[i];
 
@@ -820,9 +818,11 @@ pub mod ppu {
 
             if sprite.attr.v() {
                 offset0 += height as u16 - 1 - t;
-                offset0 = (offset0 & 0x7) + (offset0 & 0x8) << 2;
+                //bottom half gets the next tile
+                offset0 = (offset0 & 0x7) + ((offset0 & 0x8) << 2);
             } else {
-                offset0 += (t & 0x7) + (t & 0x8) << 2;
+                //bottom half gets the next tile
+                offset0 += (t & 0x7) + ((t & 0x8) << 2);
             };
 
             let x_ount = if sprite.pos_x > 248 {
@@ -836,23 +836,23 @@ pub mod ppu {
                 (0..8).rev().map(|n| n).collect::<Vec<_>>()
             };
 
-            let line_color_indx =
-                &mut color_indx[sprite.pos_x as usize..(sprite.pos_x as usize + x_ount as usize)];
+            let slice_color_indx =
+                &mut sprite_line[sprite.pos_x as usize..(sprite.pos_x as usize + x_ount as usize)];
             let pattern0 = ppu_mem.read_direct(offset0);
             let pattern1 = ppu_mem.read_direct(offset0 + 8);
             let mut n = 0;
             for j in 0..x_ount as usize {
-                if sprite.attr.p() && (line_color_indx[n] & 0x3 != 0) {
-                    line_color_indx[n] = 0;
+                if sprite.attr.p() && (color_indx[sprite.pos_x as usize + n] & 0x3 != 0) {
                     continue;
                 }
                 //颜色索引高 2bit
-                line_color_indx[n] = h2bit;
+                slice_color_indx[n] = h2bit;
                 //颜色索引低 2bit
-                line_color_indx[n] |=
+                slice_color_indx[n] |=
                     ((pattern0 >> x_range[j]) & 0x1) | (((pattern1 >> x_range[j]) & 0x1) << 1);
                 n += 1;
             }
         }
+        color_indx.copy_from_slice(&sprite_line);
     }
 }

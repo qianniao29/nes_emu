@@ -15,7 +15,7 @@ use ahash::AHashMap;
 use std::cell::RefCell;
 use std::env;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::display::disp::{self, DisplayFunc};
 use crate::display::display_sdl2::disp_sdl2;
@@ -69,17 +69,17 @@ fn main() -> Result<(), error::CustomError> {
 
     let mut cpu_cycles_end;
     let mut master_cycles: u32;
-    let mut sprite0_check_buf;
+    let mut sprite0_check_buf = [0_u8; 16];
     let mut is_odd_frame = false;
     'running: loop {
+        let start = Instant::now();
         master_cycles = 0;
         cpu::cpu_cycles_reset();
-        disp.scanline_color_indx = [0; 256];
         let (mut sprite0_x, mut sprite0_y) = (0xff, 0xff);
         let mut sprite0_should_hit;
 
-        sprite0_check_buf = [0_u8; 16];
         if mem.ppu_reg.mask.s() && mem.ppu_reg.mask.bg() {
+            sprite0_check_buf = [0_u8; 16];
             (sprite0_x, sprite0_y) =
                 ppu::get_sprint0(&mem.ppu_reg, &mut mem.ppu_mem, &mut sprite0_check_buf);
         }
@@ -104,10 +104,24 @@ fn main() -> Result<(), error::CustomError> {
             if j == 0 && is_odd_frame {
                 cpu_cycles_end -= 3;
             }
+            // let snapshot_cyc = cpu::get_cpu_cycles();
             while cpu::get_cpu_cycles() < cpu_cycles_end {
                 cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
+                // sprite0 hit
+                // if sprite0_should_hit {
+                //     let cyc_indx = cpu::get_cpu_cycles() - snapshot_cyc;
+                //     if !(mem.ppu_reg.mask.bm() | mem.ppu_reg.mask.sm()) {
+                //         if (cyc_indx >= 9 / 3)
+                //             && (cyc_indx >= sprite0_x as u32 / 3)
+                //             && (cyc_indx < 258 / 3)
+                //         {
+                //             mem.ppu_reg.status.set_s(true);
+                //         }
+                //     } else if (cyc_indx >= sprite0_x as u32 / 3) && (cyc_indx < 258 / 3) {
+                //         mem.ppu_reg.status.set_s(true);
+                //     }
+                // }
             }
-
             //dot 256, 257
             if mem.ppu_reg.mask.bg() {
                 ppu::coarse_y_wrapping(&mut mem.ppu_reg);
@@ -186,7 +200,10 @@ fn main() -> Result<(), error::CustomError> {
             break 'running;
         }
 
-        // ::std::thread::sleep(Duration::new(0, 1_000_000_000u32 / 60));
+        let sleep_msec = Duration::from_millis(1_000 / dis_std.frame_rate as u64)
+            .saturating_sub(start.elapsed());
+        // println!("Time elapsed in expensive_function() is: {:?}, sleep {:?}",start.elapsed(),sleep_msec);
+        ::std::thread::sleep(sleep_msec);
     }
 
     Ok(())
