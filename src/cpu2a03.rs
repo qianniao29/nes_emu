@@ -1423,6 +1423,28 @@ pub mod cpu {
         // );
         // println!("{:#?}", instru_addring);
     }
+
+    pub fn execute_instruction_until(
+        cpu_reg: &mut Register,
+        mem: &mut MemMap,
+        cpu_cycles_end: u32,
+    ) {
+        while get_cpu_cycles() <= cpu_cycles_end {
+            execute_one_instruction(cpu_reg, mem);
+        }
+    }
+
+    pub fn execute_instruction_until_and_hook(
+        cpu_reg: &mut Register,
+        mem: &mut MemMap,
+        cpu_cycles_end: u32,
+        hook: fn(&mut Register, &mut MemMap),
+    ) {
+        while get_cpu_cycles() <= cpu_cycles_end {
+            execute_one_instruction(cpu_reg, mem);
+            hook(cpu_reg, mem);
+        }
+    }
 }
 
 pub mod disassembly {}

@@ -75,7 +75,7 @@ pub mod disp_sdl2 {
                         for i in 0..8 {
                             let offset = j * pitch + i * 3;
                             let color_indx = tile_color_indx[i] as usize;
-                            buffer[offset..offset + 3]
+                            buffer[offset..(offset + 3)]
                                 .clone_from_slice(&self.palette_data[color_indx][..]);
                         }
                     }
@@ -93,7 +93,7 @@ pub mod disp_sdl2 {
                     for i in x as usize..256 {
                         let offset = i * 3;
                         let color_indx = self.scanline_color_indx[i] as usize;
-                        buffer[offset..offset + 3]
+                        buffer[offset..(offset + 3)]
                             .clone_from_slice(&self.palette_data[color_indx][..]);
                     }
                 })

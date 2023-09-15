@@ -101,27 +101,26 @@ fn main() -> Result<(), error::CustomError> {
             // execute code in one scanline cycles
             master_cycles += dis_std.master_cycles_scanline as u32;
             cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-            if j == 0 && is_odd_frame {
-                cpu_cycles_end -= 3;
-            }
+            cpu::execute_instruction_until(&mut cpu_reg, &mut mem, cpu_cycles_end);
             // let snapshot_cyc = cpu::get_cpu_cycles();
-            while cpu::get_cpu_cycles() < cpu_cycles_end {
-                cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
-                // sprite0 hit
-                // if sprite0_should_hit {
-                //     let cyc_indx = cpu::get_cpu_cycles() - snapshot_cyc;
-                //     if !(mem.ppu_reg.mask.bm() | mem.ppu_reg.mask.sm()) {
-                //         if (cyc_indx >= 9 / 3)
-                //             && (cyc_indx >= sprite0_x as u32 / 3)
-                //             && (cyc_indx < 258 / 3)
-                //         {
-                //             mem.ppu_reg.status.set_s(true);
-                //         }
-                //     } else if (cyc_indx >= sprite0_x as u32 / 3) && (cyc_indx < 258 / 3) {
-                //         mem.ppu_reg.status.set_s(true);
-                //     }
-                // }
-            }
+            // while cpu::get_cpu_cycles() <= cpu_cycles_end {
+            //     cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
+            //     // sprite0 hit
+            //     if sprite0_should_hit {
+            //         let cyc_indx = cpu::get_cpu_cycles() - snapshot_cyc;
+            //         if !(mem.ppu_reg.mask.bm() | mem.ppu_reg.mask.sm()) {
+            //             if (cyc_indx >= 9 / 3)
+            //                 && (cyc_indx >= sprite0_x as u32 / 3)
+            //                 && (cyc_indx < 258 / 3)
+            //             {
+            //                 mem.ppu_reg.status.set_s(true);
+            //             }
+            //         } else if (cyc_indx >= sprite0_x as u32 / 3) && (cyc_indx < 258 / 3) {
+            //             mem.ppu_reg.status.set_s(true);
+            //         }
+            //     }
+            // }
+
             //dot 256, 257
             if mem.ppu_reg.mask.bg() {
                 ppu::coarse_y_wrapping(&mut mem.ppu_reg);
@@ -163,9 +162,7 @@ fn main() -> Result<(), error::CustomError> {
         /*---------Post-render scanline-------*/
         master_cycles += dis_std.master_cycles_scanline as u32;
         cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-        while cpu::get_cpu_cycles() < cpu_cycles_end {
-            cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
-        }
+        cpu::execute_instruction_until(&mut cpu_reg, &mut mem, cpu_cycles_end);
         //sync horizon
 
         /*------------Vblank scanline------------*/
@@ -174,9 +171,7 @@ fn main() -> Result<(), error::CustomError> {
         for _ in 0..dis_std.vblank_length {
             master_cycles += dis_std.master_cycles_scanline as u32;
             cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-            while cpu::get_cpu_cycles() < cpu_cycles_end {
-                cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
-            }
+            cpu::execute_instruction_until(&mut cpu_reg, &mut mem, cpu_cycles_end);
             //sync horizon
         }
 
@@ -184,9 +179,11 @@ fn main() -> Result<(), error::CustomError> {
         //clear ppu status, vblank
         mem.ppu_reg.status.0 = 0;
 
-        while cpu::get_cpu_cycles() < dis_std.cpu_cycle_per_frame as u32 {
-            cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
-        }
+        cpu::execute_instruction_until(
+            &mut cpu_reg,
+            &mut mem,
+            dis_std.cpu_cycle_per_frame as u32 - if is_odd_frame { 3 } else { 0 },
+        );
         //sync horizon
 
         if mem.ppu_reg.mask.bg() {
@@ -202,7 +199,11 @@ fn main() -> Result<(), error::CustomError> {
 
         let sleep_msec = Duration::from_millis(1_000 / dis_std.frame_rate as u64)
             .saturating_sub(start.elapsed());
-        // println!("Time elapsed in expensive_function() is: {:?}, sleep {:?}",start.elapsed(),sleep_msec);
+        println!(
+            "Time elapsed in expensive_function() is: {:?}, sleep {:?}",
+            start.elapsed(),
+            sleep_msec
+        );
         ::std::thread::sleep(sleep_msec);
     }
 

@@ -637,9 +637,11 @@ pub mod ppu {
     1 个字节控制 4*4=16 个 tile，2bit 控制 2*2=4 个 tile。1 个字节控制 32*32 像素
     */
     #[inline]
-    fn calc_color_h2bit(tile_x: u16, tile_y: u16, ppu_mem: &MemMap) -> u8 {
+    fn calc_color_h2bit(ppu_reg: &Register, ppu_mem: &MemMap) -> u8 {
+        let tile_x = ppu_reg.ppu_addr.coarse_x() as u16;
+        let tile_y = ppu_reg.ppu_addr.coarse_y() as u16;
         let attribute_id = (tile_x >> 2) + (tile_y >> 2) * 8;
-        let attr = ppu_mem.read_direct(attribute_id + 960 + 0x2000);
+        let attr = ppu_mem.read_direct(attribute_id + 960 + 0x2000 + (ppu_reg.ppu_addr.0 & 0xc00));
         let shift = ((tile_x & 0x2) + ((tile_y & 0x2) << 1)) as u8; //((pos_x&0x1f)>>4 + (pos_y&0x1f)>>4*2)*2;
         ((attr >> shift) & 0x3) << 2
     }
@@ -669,22 +671,17 @@ pub mod ppu {
     pub fn render_bg_scanline(ppu_reg: &mut Register, ppu_mem: &MemMap, color_indx: &mut [u8]) {
         let mut buf_ind = 0;
         let fine_x = ppu_reg.fine_x_scroll as usize;
-        let tile_y = ppu_reg.ppu_addr.coarse_y() as u16;
 
-        let mut fill_color = |tile_nums: usize, pixel_start: usize, pixel_end: usize| {
-            if pixel_end == pixel_start {
-                return;
-            }
-            let tile_x = ppu_reg.ppu_addr.coarse_x() as u16;
-            let color_h2bit = calc_color_h2bit(tile_x, tile_y, ppu_mem);
+        let mut fill_color = |tile_count: usize, pixel_start: &[usize], pixel_end: &[usize]| {
 
-            for _ in 0..tile_nums {
+            for i in 0..tile_count {
+                let color_h2bit = calc_color_h2bit(ppu_reg, ppu_mem);
                 let offset = calc_pattern(ppu_reg, ppu_mem);
                 coarse_x_wrapping(ppu_reg);
 
                 let pattern0 = ppu_mem.read_direct(offset);
                 let pattern1 = ppu_mem.read_direct(offset + 8);
-                for j in pixel_start..pixel_end {
+                for j in pixel_start[i]..pixel_end[i] {
                     //颜色索引高 2bit
                     color_indx[buf_ind] = color_h2bit;
                     //颜色索引低 2bit
@@ -695,17 +692,12 @@ pub mod ppu {
             }
         };
 
-        if fine_x == 0 {
-            for _ in 0..16 {
-                fill_color(2, 0, 8);
-            }
-        } else {
-            fill_color(1, fine_x, 8);
-            fill_color(1, 0, 8);
-            for _ in 1..16 {
-                fill_color(2, 0, 8);
-            }
-            fill_color(1, 0, fine_x);
+        fill_color(2, &[fine_x, 0], &[8, 8]);
+        for _ in 1..16 {
+            fill_color(2, &[0, 0], &[8, 8]);
+        }
+        if fine_x != 0 {
+            fill_color(1, &[0], &[fine_x]);
         }
     }
 
@@ -715,7 +707,8 @@ pub mod ppu {
         ppu_mem: &mut MemMap,
         color_indx: &mut [u8],
     ) -> (u16, u16, bool) {
-        let sprite = Sprite::new(&ppu_mem.oam[sprite_id as usize * 4..sprite_id as usize * 4 + 4]);
+        let sprite =
+            Sprite::new(&ppu_mem.oam[(sprite_id as usize * 4)..(sprite_id as usize * 4 + 4)]);
         if sprite.pos_y > 0xef || sprite.attr.p() {
             return (sprite.pos_x as u16, sprite.pos_y as u16, false);
         }
@@ -775,7 +768,7 @@ pub mod ppu {
 
         ppu_mem.oam2 = Default::default();
         for n in 0..64 {
-            let sprite = &ppu_mem.oam[n * 4..n * 4 + 4];
+            let sprite = &ppu_mem.oam[(n * 4)..(n * 4 + 4)];
 
             if (sprite[m] <= line) && (line < (sprite[m] + height)) {
                 if count < 8 {
@@ -836,8 +829,8 @@ pub mod ppu {
                 (0..8).rev().map(|n| n).collect::<Vec<_>>()
             };
 
-            let slice_color_indx =
-                &mut sprite_line[sprite.pos_x as usize..(sprite.pos_x as usize + x_ount as usize)];
+            let slice_color_indx = &mut sprite_line
+                [(sprite.pos_x as usize)..(sprite.pos_x as usize + x_ount as usize)];
             let pattern0 = ppu_mem.read_direct(offset0);
             let pattern1 = ppu_mem.read_direct(offset0 + 8);
             let mut n = 0;
