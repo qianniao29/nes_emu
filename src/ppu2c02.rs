@@ -49,7 +49,7 @@ pub mod ppu {
                 self.pseudo_cache = bank.borrow()[j];
                 val
             } else {
-                let palet_addr: usize = ((addr_map - 0x3f00) & 0x1f).into();
+                let palet_addr: usize = (addr_map & 0x1f).into();
                 self.pseudo_cache = self.palette_indx_tbl[palet_addr];
                 self.palette_indx_tbl[palet_addr]
             }
@@ -65,7 +65,7 @@ pub mod ppu {
                 let val = bank.borrow()[j];
                 val
             } else {
-                let palet_addr: usize = ((addr_map - 0x3f00) & 0x1f).into();
+                let palet_addr: usize = (addr_map & 0x1f).into();
                 self.palette_indx_tbl[palet_addr]
             }
         }
@@ -136,7 +136,7 @@ pub mod ppu {
         }
     }
 
-    use bitfield;
+    use bitfield::{self, Bit, BitMut};
 
     /*
     PPUCTRL: WriteOnly
@@ -518,8 +518,14 @@ pub mod ppu {
         let height;
         let mut tile = sprite.tile_indx as u16;
         let mut base = 0;
+        let y_range;
         if ppu_reg.ctrl.h() {
             height = 16;
+            y_range = if sprite.attr.v() {
+                &[15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+            } else {
+                &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+            };
             if tile & 0x1 != 0x00 {
                 base = 0x1000_u16;
             }
@@ -527,36 +533,36 @@ pub mod ppu {
             tile &= 0xfe;
         } else {
             height = 8;
+            y_range = if sprite.attr.v() {
+                &[7, 6, 5, 4, 3, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            } else {
+                &[0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0]
+            };
             if ppu_reg.ctrl.s() {
                 base = 0x1000_u16;
             }
         }
         let mut offset0 = (tile << 4) + base;
 
-        let y_range = if sprite.attr.v() {
-            (0..height as usize).rev().map(|n| n).collect::<Vec<_>>()
-        } else {
-            (0..height as usize).map(|n| n).collect::<Vec<_>>()
-        };
         let x_count = if sprite.pos_x > 248 {
             255 - sprite.pos_x + 1
         } else {
             8
         };
         let x_range = if sprite.attr.h() {
-            (0..8).map(|n| n).collect::<Vec<_>>()
+            &[0, 1, 2, 3, 4, 5, 6, 7]
         } else {
-            (0..8).rev().map(|n| n).collect::<Vec<_>>()
+            &[7, 6, 5, 4, 3, 2, 1, 0]
         };
 
         for y in 0..height {
             //if 8x16 sprites, bottom half gets the next tile
             let pattern0 = ppu_mem.read_direct(offset0 + (y & 0x8));
             let pattern1 = ppu_mem.read_direct(offset0 + (y & 0x8) + 8);
-            for j in 0..x_count {
+            for j in 0..x_count as usize {
                 //颜色索引低 2bit 是否为 0，不为 0 的话就是不透明色
-                sprite0_buf[y_range[y as usize]] |=
-                    (((pattern0 | pattern1) >> x_range[j as usize]) & 0x1) << j;
+                // sprite0_buf[y_range[y as usize]] |= (((pattern0 | pattern1) >> x_range[j]) & 0x1) << j;
+                sprite0_buf[y_range[y as usize]].set_bit(j, (pattern0 | pattern1).bit(x_range[j]));
             }
             offset0 += 1;
         }
@@ -606,7 +612,8 @@ pub mod ppu {
         let x_range_max = if x > 248 { 255 - x + 1 } else { 8 };
 
         for i in 0..x_range_max {
-            check_bg |= ((color_indx[x + i] | (color_indx[x + i] >> 1)) & 0x1) << i;
+            // check_bg |= ((color_indx[x + i] | (color_indx[x + i] >> 1)) & 0x1) << i;
+            check_bg.set_bit(i, (color_indx[x + i] & 0x3) != 0);
         }
         check_bg
     }
@@ -671,32 +678,50 @@ pub mod ppu {
     pub fn render_bg_scanline(ppu_reg: &mut Register, ppu_mem: &MemMap, color_indx: &mut [u8]) {
         let mut buf_ind = 0;
         let fine_x = ppu_reg.fine_x_scroll as usize;
+        let tile_x_is_odd = ppu_reg.ppu_addr.coarse_x().bit(0);
 
-        let mut fill_color = |tile_count: usize, pixel_start: &[usize], pixel_end: &[usize]| {
-
-            for i in 0..tile_count {
+        let mut fill_color =
+            |tile_count_1_or_2: usize, pixel_start: &[usize], pixel_end: &[usize]| {
                 let color_h2bit = calc_color_h2bit(ppu_reg, ppu_mem);
-                let offset = calc_pattern(ppu_reg, ppu_mem);
-                coarse_x_wrapping(ppu_reg);
+                for i in 0..tile_count_1_or_2 {
+                    let offset = calc_pattern(ppu_reg, ppu_mem);
+                    coarse_x_wrapping(ppu_reg);
 
-                let pattern0 = ppu_mem.read_direct(offset);
-                let pattern1 = ppu_mem.read_direct(offset + 8);
-                for j in pixel_start[i]..pixel_end[i] {
-                    //颜色索引高 2bit
-                    color_indx[buf_ind] = color_h2bit;
-                    //颜色索引低 2bit
-                    color_indx[buf_ind] |= (pattern0 >> (7 - j)) & 0x1;
-                    color_indx[buf_ind] |= ((pattern1 >> (7 - j)) & 0x1) << 1;
-                    buf_ind += 1;
+                    let pattern0 = ppu_mem.read_direct(offset);
+                    let pattern1 = ppu_mem.read_direct(offset + 8);
+                    for j in pixel_start[i]..pixel_end[i] {
+                        //颜色索引高 2bit
+                        color_indx[buf_ind] = color_h2bit;
+                        //颜色索引低 2bit
+                        color_indx[buf_ind] |= (pattern0 >> (7 - j)) & 0x1;
+                        color_indx[buf_ind] |= ((pattern1 >> (7 - j)) & 0x1) << 1;
+                        buf_ind += 1;
+                    }
                 }
-            }
-        };
+            };
 
-        fill_color(2, &[fine_x, 0], &[8, 8]);
-        for _ in 1..16 {
-            fill_color(2, &[0, 0], &[8, 8]);
-        }
-        if fine_x != 0 {
+        if tile_x_is_odd == false && fine_x == 0 {
+            for _ in 0..16 {
+                fill_color(2, &[0, 0], &[8, 8]);
+            }
+        } else if tile_x_is_odd && fine_x != 0 {
+            fill_color(1, &[fine_x], &[8]);
+            for _ in 1..16 {
+                fill_color(2, &[0, 0], &[8, 8]);
+            }
+            fill_color(1, &[0], &[8]);
+            fill_color(1, &[0], &[fine_x]);
+        } else if tile_x_is_odd && fine_x == 0 {
+            fill_color(1, &[0], &[8]);
+            for _ in 1..16 {
+                fill_color(2, &[0, 0], &[8, 8]);
+            }
+            fill_color(1, &[0], &[8]);
+        } else if tile_x_is_odd == false && fine_x != 0 {
+            fill_color(2, &[fine_x, 0], &[8, 8]);
+            for _ in 1..16 {
+                fill_color(2, &[0, 0], &[8, 8]);
+            }
             fill_color(1, &[0], &[fine_x]);
         }
     }
@@ -758,21 +783,19 @@ pub mod ppu {
         if y > 0xef {
             return;
         }
-        if (ppu_reg.mask.bg() == false) && (ppu_reg.mask.s() == false) {
-            return;
-        }
         let line = y as u8;
         let mut count = 0;
         let mut m = 0;
         let height = if ppu_reg.ctrl.h() { 16 } else { 8 };
+        let mut is_bg_displayable = [0_u8; 8];
 
-        ppu_mem.oam2 = Default::default();
         for n in 0..64 {
             let sprite = &ppu_mem.oam[(n * 4)..(n * 4 + 4)];
 
             if (sprite[m] <= line) && (line < (sprite[m] + height)) {
                 if count < 8 {
                     ppu_mem.oam2[count].convert_from_slice(sprite);
+                    is_bg_displayable[count] = check_backgroud(sprite[3] as usize, &color_indx);
                 } else {
                     //set overflow
                     ppu_reg.status.set_o(true);
@@ -782,41 +805,50 @@ pub mod ppu {
                 m = (m + 1) & 0x3;
             }
         }
+
         if ppu_reg.mask.s() == false {
             return;
         }
+        color_indx.copy_from_slice(&[0; 256]);
         if count > 8 {
             count = 8
         }
-        let mut sprite_line = [0_u8; 256];
+
+        let mut base = if (ppu_reg.ctrl.h() == false) && (ppu_reg.ctrl.s() == true) {
+            0x1000_u16
+        } else {
+            0
+        };
         for i in (0..count).rev() {
             let sprite = &ppu_mem.oam2[i];
-
             let h2bit = sprite.attr.h2bit() << 2;
             let mut tile = sprite.tile_indx as u16;
-            let mut base = 0;
             if ppu_reg.ctrl.h() {
+                /* Tile number of top of sprite (0 to 254; bottom half gets the next tile)
+                    $00: $0000-$001F
+                    $01: $1000-$101F
+                    $02: $0020-$003F
+                    $03: $1020-$103F
+                    $04: $0040-$005F
+                    [...]
+                    $FE: $0FE0-$0FFF
+                    $FF: $1FE0-$1FFF
+                */
                 if tile & 0x1 != 0x00 {
                     base = 0x1000_u16;
+                } else {
+                    base = 0;
                 }
-                //Tile number of top of sprite (0 to 254; bottom half gets the next tile)
                 tile &= 0xfe;
-            } else {
-                if ppu_reg.ctrl.s() {
-                    base = 0x1000_u16;
-                }
             }
             let mut offset0 = (tile << 4) + base;
-            let t = (line - sprite.pos_y) as u16;
+            let mut t = line - sprite.pos_y;
 
             if sprite.attr.v() {
-                offset0 += height as u16 - 1 - t;
-                //bottom half gets the next tile
-                offset0 = (offset0 & 0x7) + ((offset0 & 0x8) << 2);
-            } else {
-                //bottom half gets the next tile
-                offset0 += (t & 0x7) + ((t & 0x8) << 2);
-            };
+                t = height - 1 - t;
+            }
+            //bottom half gets the next tile
+            offset0 += ((t & 0x7) + ((t & 0x8) << 2)) as u16;
 
             let x_ount = if sprite.pos_x > 248 {
                 255 - sprite.pos_x + 1
@@ -824,28 +856,25 @@ pub mod ppu {
                 8
             };
             let x_range = if sprite.attr.h() {
-                (0..8).map(|n| n).collect::<Vec<_>>()
+                &[0, 1, 2, 3, 4, 5, 6, 7]
             } else {
-                (0..8).rev().map(|n| n).collect::<Vec<_>>()
+                &[7, 6, 5, 4, 3, 2, 1, 0]
             };
 
-            let slice_color_indx = &mut sprite_line
-                [(sprite.pos_x as usize)..(sprite.pos_x as usize + x_ount as usize)];
+            let slice_color_indx =
+                &mut color_indx[(sprite.pos_x as usize)..(sprite.pos_x as usize + x_ount as usize)];
             let pattern0 = ppu_mem.read_direct(offset0);
             let pattern1 = ppu_mem.read_direct(offset0 + 8);
-            let mut n = 0;
             for j in 0..x_ount as usize {
-                if sprite.attr.p() && (color_indx[sprite.pos_x as usize + n] & 0x3 != 0) {
+                if sprite.attr.p() && is_bg_displayable[i].bit(j) {
                     continue;
                 }
                 //颜色索引高 2bit
-                slice_color_indx[n] = h2bit;
+                slice_color_indx[j] = h2bit;
                 //颜色索引低 2bit
-                slice_color_indx[n] |=
+                slice_color_indx[j] |=
                     ((pattern0 >> x_range[j]) & 0x1) | (((pattern1 >> x_range[j]) & 0x1) << 1);
-                n += 1;
             }
         }
-        color_indx.copy_from_slice(&sprite_line);
     }
 }

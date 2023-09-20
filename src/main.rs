@@ -145,12 +145,15 @@ fn main() -> Result<(), error::CustomError> {
             }
 
             //render sprite
-            ppu::render_sprite_scanline(
-                j,
-                &mut mem.ppu_reg,
-                &mut mem.ppu_mem,
-                &mut disp.scanline_color_indx,
-            );
+            if mem.ppu_reg.mask.bg() || mem.ppu_reg.mask.s() {
+                ppu::render_sprite_scanline(
+                    j,
+                    &mut mem.ppu_reg,
+                    &mut mem.ppu_mem,
+                    &mut disp.scanline_color_indx,
+                );
+            }
+
             if mem.ppu_reg.mask.s() {
                 //genert bg platette data
                 disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
@@ -199,12 +202,12 @@ fn main() -> Result<(), error::CustomError> {
 
         let sleep_msec = Duration::from_millis(1_000 / dis_std.frame_rate as u64)
             .saturating_sub(start.elapsed());
-        println!(
-            "Time elapsed in expensive_function() is: {:?}, sleep {:?}",
-            start.elapsed(),
-            sleep_msec
-        );
-        ::std::thread::sleep(sleep_msec);
+        // println!(
+        //     "Time elapsed: {:?}, sleep {:?}",
+        //     start.elapsed(),
+        //     sleep_msec
+        // );
+        std::thread::sleep(sleep_msec);
     }
 
     Ok(())
