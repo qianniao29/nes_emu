@@ -427,45 +427,6 @@ pub mod ppu {
         }
     }
 
-    // 背景 8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
-    pub fn render_tile(
-        pos_x: u16,
-        pos_y: u16,
-        ppu_reg: &Register,
-        ppu_mem: &mut MemMap,
-        color_indx: &mut [Vec<u8>; 8],
-    ) {
-        let tile_id = ((pos_x >> 3) + (pos_y >> 3) * 32) | 0x2000; //8*8 个像素为 1 个块，256*240 像素被分为 32*30 个块
-        ppu_mem.read(tile_id); // refresh cache
-        let mut pattern = ppu_mem.read(tile_id) as u16; //read again
-        pattern <<= 4; //pattern table 以 16 bytes 为一个单位，存储像素的颜色索引，前 8 个 byte 存储低 1 个 bit，后 8 个 byte 存储高 1bit
-        let ind = if ppu_reg.ctrl.b() { 0x1000_u16 } else { 0 };
-        let mut offset0 = pattern + ind;
-        let mut offset1 = offset0 + 8;
-
-        // 计算所在属性表
-        // 1 个字节控制 4*4=16 个 tile，2bit 控制 2*2=4 个 tile。1 个字节控制 32*32 像素
-        let attribute_id = (pos_x >> 5) + (pos_y >> 5) * 8;
-        let attr = ppu_mem.read(attribute_id + 960 + 0x2000);
-        let shift = (((pos_x & 0x10) >> 3) + ((pos_y & 0x10) >> 2)) as u8; //((pos_x&0x1f)>>4 + (pos_y&0x1f)>>4*2)*2;
-        let color_h2bit = ((attr >> shift) & 0x3) << 2;
-        for i in 0..8 {
-            ppu_mem.read(offset0);
-            let name0 = ppu_mem.read(offset0);
-            ppu_mem.read(offset1);
-            let name1 = ppu_mem.read(offset1);
-            for j in 0..8 {
-                //颜色索引高 2bit
-                color_indx[i][j] = color_h2bit;
-                //颜色索引低 2bit
-                color_indx[i][j] |= (name0 >> (7 - j)) & 0x1;
-                color_indx[i][j] |= ((name1 >> (7 - j)) & 0x1) << 1;
-            }
-            offset0 += 1;
-            offset1 += 1;
-        }
-    }
-
     pub fn coarse_y_wrapping(ppu_reg: &mut Register) {
         // http://wiki.nesdev.com/w/index.php/PPU_scrolling#Wrapping_around
         if ppu_reg.ppu_addr.fine_y() >= 7 {
@@ -618,27 +579,6 @@ pub mod ppu {
         check_bg
     }
 
-    pub fn check_sprite_overflow(ppu_reg: &Register, ppu_mem: &MemMap) -> u16 {
-        let mut cnt_map: AHashMap<u8, u8> = AHashMap::new();
-        let height = if ppu_reg.ctrl.h() { 16 } else { 8 };
-
-        let mut pos_y: u16;
-        for i in 0..64 {
-            for j in 0..height {
-                pos_y = ppu_mem.oam[4 * i] as u16 + j;
-                if pos_y > 240 {
-                    continue;
-                }
-                let cnt = cnt_map.entry(pos_y as u8).or_insert(1);
-                *cnt = *cnt + 1;
-                if *cnt > 8 {
-                    return pos_y as u16;
-                }
-            }
-        }
-        return 0xffff;
-    }
-
     /*
     计算所在属性表
     1 个字节控制 4*4=16 个 tile，2bit 控制 2*2=4 个 tile。1 个字节控制 32*32 像素
@@ -709,8 +649,7 @@ pub mod ppu {
             for _ in 1..16 {
                 fill_color(2, &[0, 0], &[8, 8]);
             }
-            fill_color(1, &[0], &[8]);
-            fill_color(1, &[0], &[fine_x]);
+            fill_color(2, &[0, 0], &[8, fine_x]);
         } else if tile_x_is_odd && fine_x == 0 {
             fill_color(1, &[0], &[8]);
             for _ in 1..16 {
@@ -724,54 +663,6 @@ pub mod ppu {
             }
             fill_color(1, &[0], &[fine_x]);
         }
-    }
-
-    pub fn render_sprite(
-        sprite_id: u8,
-        ppu_reg: &Register,
-        ppu_mem: &mut MemMap,
-        color_indx: &mut [u8],
-    ) -> (u16, u16, bool) {
-        let sprite =
-            Sprite::new(&ppu_mem.oam[(sprite_id as usize * 4)..(sprite_id as usize * 4 + 4)]);
-        if sprite.pos_y > 0xef || sprite.attr.p() {
-            return (sprite.pos_x as u16, sprite.pos_y as u16, false);
-        }
-
-        let h2bit = sprite.attr.h2bit() << 2;
-        let ind = if ppu_reg.ctrl.s() { 0x1000_u16 } else { 0 };
-        let mut offset0 = ((sprite.tile_indx as u16) << 4) + ind;
-        let mut offset1 = offset0 + 8;
-
-        let y_range = if sprite.attr.v() {
-            (0..8).rev().map(|n| n).collect::<Vec<_>>()
-        } else {
-            (0..8).map(|n| n).collect::<Vec<_>>()
-        };
-        let x_range = if sprite.attr.h() {
-            (0..8).map(|n| n).collect::<Vec<_>>()
-        } else {
-            (0..8).rev().map(|n| n).collect::<Vec<_>>()
-        };
-        for y in y_range {
-            let line_color_indx = &mut color_indx[(y * 8)..(y * 8 + 8)];
-            ppu_mem.read(offset0);
-            let name0 = ppu_mem.read(offset0);
-            ppu_mem.read(offset1);
-            let name1 = ppu_mem.read(offset1);
-            let mut n = 0;
-            for j in &x_range {
-                //颜色索引高 2bit
-                line_color_indx[n] = h2bit;
-                //颜色索引低 2bit
-                line_color_indx[n] |= ((name0 >> j) & 0x1) | (((name1 >> j) & 0x1) << 1);
-                n += 1;
-            }
-            offset0 += 1;
-            offset1 += 1;
-        }
-
-        (sprite.pos_x as u16, sprite.pos_y as u16, true)
     }
 
     pub fn render_sprite_scanline(

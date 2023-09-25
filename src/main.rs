@@ -155,7 +155,7 @@ fn main() -> Result<(), error::CustomError> {
             }
 
             if mem.ppu_reg.mask.s() {
-                //genert bg platette data
+                //genert sprite platette data
                 disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
                 //actually, sprite y is + 1
                 disp.draw_sprite_scanline(if mem.ppu_reg.mask.sm() { 0 } else { 8 }, j);
@@ -169,7 +169,7 @@ fn main() -> Result<(), error::CustomError> {
         //sync horizon
 
         /*------------Vblank scanline------------*/
-        disp::vblank(&mut cpu_reg, &mut mem);
+        cpu::vblank(&mut cpu_reg, &mut mem);
         // execute code after NMI
         for _ in 0..dis_std.vblank_length {
             master_cycles += dis_std.master_cycles_scanline as u32;

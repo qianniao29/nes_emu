@@ -315,7 +315,7 @@ pub mod cpu {
         }
     }
 
-    pub fn nmi_handler(cpu_reg: &mut Register, mem: &mut MemMap) {
+    fn nmi_handler(cpu_reg: &mut Register, mem: &mut MemMap) {
         let mut val_pc = cpu_reg.pc;
         mem.push(&mut cpu_reg.sp, (val_pc >> 8) as u8);
         mem.push(&mut cpu_reg.sp, (val_pc & 0xff) as u8);
@@ -329,6 +329,14 @@ pub mod cpu {
         cpu_reg.pc = val_pc;
         cpu_cycles_add(7);
     }
+
+    pub fn vblank(cpu_reg: &mut Register, mem: &mut MemMap) {
+        mem.ppu_reg.status.set_v(true);
+        if mem.ppu_reg.ctrl.v() {
+            nmi_handler(cpu_reg, mem);
+        }
+    }
+
 
     #[derive(Debug)]
     pub enum AddressingMode {
@@ -1446,5 +1454,3 @@ pub mod cpu {
         }
     }
 }
-
-pub mod disassembly {}

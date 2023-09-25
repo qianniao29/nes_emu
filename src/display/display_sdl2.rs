@@ -66,26 +66,6 @@ pub mod disp_sdl2 {
                 self.palette_data[i] = PLALETTE_STD_DATA[palette_indx_tbl[0] as usize];
             }
         }
-        fn draw_bg_tile(&mut self, x: u16, y: u16) {
-            self.dev
-                .texture
-                .with_lock(None, |buffer: &mut [u8], pitch: usize| {
-                    for j in 0..8 {
-                        let tile_color_indx = &self.scanline_color_indx[(j * 8)..(j * 8 + 8)];
-                        for i in 0..8 {
-                            let offset = j * pitch + i * 3;
-                            let color_indx = tile_color_indx[i] as usize;
-                            buffer[offset..(offset + 3)]
-                                .clone_from_slice(&self.palette_data[color_indx][..]);
-                        }
-                    }
-                })
-                .unwrap();
-            self.dev
-                .canvas
-                .copy(&self.dev.texture, None, Rect::new(x.into(), y.into(), 8, 8))
-                .unwrap();
-        }
         fn draw_bg_scanline(&mut self, x: u16, y: u16) {
             self.dev
                 .texture
@@ -106,26 +86,6 @@ pub mod disp_sdl2 {
                     Rect::new(x.into(), y.into(), 256 - x as u32, 1),
                 )
                 .unwrap();
-        }
-        fn draw_sprite(&mut self, x: u16, y: u16) {
-            for j in 0..8 {
-                let tile_color_indx = &self.scanline_color_indx[(j * 8)..(j * 8 + 8)];
-                for i in 0..8 {
-                    let color_indx = tile_color_indx[i] as usize;
-                    if color_indx & 3 == 0 {
-                        continue;
-                    } // 透明色精灵，保持背景色不变
-                    self.dev.canvas.set_draw_color(Color::RGB(
-                        self.palette_data[color_indx][0],
-                        self.palette_data[color_indx][1],
-                        self.palette_data[color_indx][2],
-                    ));
-                    self.dev
-                        .canvas
-                        .draw_point((x as i32 + i as i32, y as i32 + j as i32))
-                        .unwrap();
-                }
-            }
         }
         fn draw_sprite_scanline(&mut self, x: u16, y: u16) {
             for i in x as usize..256 {
