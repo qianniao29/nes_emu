@@ -121,6 +121,11 @@ fn main() -> Result<(), error::CustomError> {
             //     }
             // }
 
+            /* all 262 line trigger 4 times, so trigger per 65 line. */
+            if j == 65 || j == 130 || j == 195 {
+                // APU frame counter trigger
+            }
+
             //dot 256, 257
             if mem.ppu_reg.mask.bg() {
                 ppu::coarse_y_wrapping(&mut mem.ppu_reg);
@@ -188,6 +193,8 @@ fn main() -> Result<(), error::CustomError> {
             dis_std.cpu_cycle_per_frame as u32 - if is_odd_frame { 3 } else { 0 },
         );
         //sync horizon
+
+        //APU frame counter trigger 4th time
 
         if mem.ppu_reg.mask.bg() {
             ppu::cpoy_y_from_t_to_v(&mut mem.ppu_reg);
