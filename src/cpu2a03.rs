@@ -1465,6 +1465,10 @@ pub mod cpu {
 }
 
 pub mod apu {
+    use blip_buf::BlipBuf;
+
+    use crate::cpu::get_cpu_cycles;
+
     /* DDLC VVVV
      Duty (D),
     envelope loop / length counter halt (L),
@@ -1566,8 +1570,7 @@ pub mod apu {
 
     #[repr(C)]
     struct Register {
-        pulse1: PulseReg,      //$4000~$4003
-        pulse2: PulseReg,      //$4004~$4007
+        pulse: [PulseReg; 2],  //$4000~$4003, $4004~$4007
         triangle: TriangleReg, //$4008~$400b
         noise: NoiseReg,       //$400c~$400f
         dmc: DmcReg,           //$4010~$4013
@@ -1631,23 +1634,99 @@ pub mod apu {
     }
 
     #[derive(Debug, Default)]
+    struct Counter {
+        counter: u16,
+        period: u16,
+    }
+    impl Counter {
+        pub fn count_once<F>(&mut self, mut trig_closure_hook: F)
+        where
+            F: FnMut(&mut Self),
+        {
+            if self.counter != 0 {
+                self.counter -= 1;
+            }
+            if self.counter == 0 {
+                trig_closure_hook(self);
+            }
+        }
+
+        pub fn count<F>(&mut self, nticks: u32, mut trig_closure_hook: F)
+        where
+            F: FnMut(&mut Self, u32),
+        {
+            let m = self.counter as u32 + nticks;
+            self.counter = (m % self.period as u32) as u16;
+            trig_closure_hook(self, m / self.period as u32);
+        }
+    }
+
+    struct BlipData {
+        buffer: BlipBuf,
+        tick: u32,
+        ampl: i32,
+    }
+
+    impl BlipData {
+        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+            let mut blip_buffer = BlipBuf::new(sample_rate);
+            blip_buffer.set_rates(f64::from(cpu_clock_hz), f64::from(sample_rate));
+
+            BlipData {
+                buffer: blip_buffer,
+                tick: 0,
+                ampl: 0,
+            }
+        }
+
+        fn fill(&mut self, tick: u32, ampl: i32) {
+            self.tick = tick;
+            self.buffer.add_delta(tick, ampl - self.ampl);
+            self.ampl = ampl;
+        }
+    }
+
     pub struct PulseDev {
-        timer: u8,
-        len_cnt: u8,
+        freq_div: Counter,
+        evelope_div: Counter,
+        length_counter: u8,
+        sweep_div: Counter,
+        volume: u8,
+        blip: BlipData,
+        duty_id: u8,
+    }
+
+    impl PulseDev {
+        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+            Self {
+                freq_div: Default::default(),
+                evelope_div: Default::default(),
+                length_counter: 0,
+                sweep_div: Default::default(),
+                volume: 0,
+                blip: BlipData::new(cpu_clock_hz, sample_rate),
+                duty_id: 0,
+            }
+        }
     }
 
     pub struct Apu {
+        reg: [u8; 0x18],
         pub cpu_clock_hz: u32,
         pub frame_counter: u8,
         pub pulse: [PulseDev; 2],
     }
 
     impl Apu {
-        pub fn new(cpu_clock_hz: u32) -> Self {
+        pub fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
             Apu {
+                reg: [0; 0x18],
                 cpu_clock_hz,
                 frame_counter: 0,
-                pulse: Default::default(),
+                pulse: [
+                    PulseDev::new(cpu_clock_hz, sample_rate),
+                    PulseDev::new(cpu_clock_hz, sample_rate),
+                ],
             }
         }
 
@@ -1662,19 +1741,97 @@ pub mod apu {
                             v            v             v
         Envelope --------> Gate ------> Gate -------> Gate ---> (to mixer)
         *******************************************************************/
-        pub fn generate_pulse_wave(&mut self, reg: &[u8; 0x18], ticks: u32) {
-            let mut i = 0;
-            let apu_reg = unsafe { std::mem::transmute::<&[u8; 0x18], &Register>(reg) };
-
-            while i < ticks {
-                i += 1;
-                self.pulse[0].len_cnt = self.pulse[0].len_cnt - 1;
-                if self.pulse[0].len_cnt == 0 {
-                    self.pulse[0].len_cnt = apu_reg.pulse1.length_counter.length_counter_load();
+        fn generate_pulse_wave(&mut self, apu_reg: &Register, cpu_ticks: u32) {
+            for i in 0..2 {
+                // envelope
+                if apu_reg.pulse[i].envelope.constant_volume() == false {
+                    let volume = &mut self.pulse[i].volume;
+                    self.pulse[i].evelope_div.count_once(|div| {
+                        div.counter = div.period;
+                        if *volume == 0 {
+                            if apu_reg.pulse[i].envelope.envelope_loop() == true {
+                                *volume = 15;
+                            }
+                        } else {
+                            *volume -= 1;
+                        }
+                    });
                 }
+                // length count
+                if ((apu_reg.sta_ctrl.0 & 1 << i) != 0) && (apu_reg.pulse[i].envelope.envelope_loop() == false) {
+                    if self.pulse[i].length_counter > 0 {
+                        self.pulse[i].length_counter -= 1;
+                    }
+                }
+                // sweep
+                if apu_reg.pulse[i].sweep.enabled() == true && apu_reg.pulse[i].sweep.shift() != 0 {
+                    if self.pulse[i].freq_div.counter > 7 && self.pulse[i].freq_div.counter < 2048 {
+                        let mut timer = self.pulse[i].freq_div.counter;
+                        self.pulse[i].sweep_div.count_once(|div| {
+                            div.counter = div.period;
+                            let result = timer >> apu_reg.pulse[i].sweep.shift();
+                            if apu_reg.pulse[i].sweep.negate() {
+                                timer = timer.saturating_sub(result + 1 - i as u16);
+                            } else {
+                                timer = timer + result;
+                            }
+                        });
+                        self.pulse[i].freq_div.counter = timer;
+                        self.pulse[i].freq_div.period = timer;
+                    }
+                }
+
+                let blip = &mut self.pulse[i].blip;
+                let period = self.pulse[i].freq_div.period as u32;
+                let vl = if ((apu_reg.sta_ctrl.0 & 1 << i) == 0)
+                    || (self.pulse[i].length_counter == 0)
+                    || (self.pulse[i].freq_div.period < 8)
+                    || (self.pulse[i].freq_div.period > 0x7ff)
+                {
+                    0
+                } else {
+                    let duty_id = self.pulse[i].duty_id as usize;
+                    self.pulse[i].duty_id = (self.pulse[i].duty_id + 1) & 0x7;
+                    if PULSE_WAVE_DUTY_TBL[apu_reg.pulse[i].envelope.duty() as usize][duty_id] == 0 {
+                        0
+                    } else {
+                        self.pulse[i].volume as i32
+                    }
+                };
+                self.pulse[i].freq_div.count(cpu_ticks / 2, |_, n| {
+                    for _ in 0..n {
+                        blip.fill(blip.tick + 2 * period, vl);
+                    }
+                });
             }
         }
 
-        pub fn frame_counter_trigger(&mut self) {}
+        /*********************** Triangle channel **************************
+              Linear Counter   Length Counter
+                    |                |
+                    v                v
+        Timer ---> Gate ----------> Gate ---> Sequencer ---> (to mixer)
+        *******************************************************************/
+        fn generate_triangle_wave(&mut self, apu_reg: &Register, cpu_ticks: u32) {
+        }
+
+        pub fn frame_counter_trig(&mut self) {
+            let cpu_now_cycles = get_cpu_cycles();
+            let apu_reg = unsafe { std::mem::transmute::<&[u8; 0x18], &Register>(&self.reg) };
+
+            self.generate_pulse_wave(apu_reg, cpu_now_cycles);
+
+        }
     }
+
+    const PULSE_LENGTH_COUNTER_TBL: [u8; 32] = [
+        10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96,
+        22, 192, 24, 72, 26, 16, 28, 32, 30,
+    ];
+    const PULSE_WAVE_DUTY_TBL: [[u8; 8]; 4] = [
+        [0, 1, 0, 0, 0, 0, 0, 0],
+        [0, 1, 1, 0, 0, 0, 0, 0],
+        [0, 1, 1, 1, 1, 0, 0, 0],
+        [1, 0, 0, 1, 1, 1, 1, 1],
+    ];
 }
