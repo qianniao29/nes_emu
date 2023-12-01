@@ -1475,6 +1475,7 @@ pub mod apu {
     constant volume (C),
     volume/envelope (V) */
     bitfield! {
+        #[derive(Copy, Clone, Default)]
         pub struct EnvelopeReg(u8);
         impl Debug;
         u8;
@@ -1485,6 +1486,7 @@ pub mod apu {
     }
     /* Sweep unit: enabled (E), period (P), negate (N), shift (S)  */
     bitfield! {
+        #[derive(Copy, Clone, Default)]
         pub struct SweepReg(u8);
         impl Debug;
         u8;
@@ -1495,27 +1497,41 @@ pub mod apu {
     }
     /*  LLLL LTTT 	Length counter load (L), timer high (T)  */
     bitfield! {
+        #[derive(Copy, Clone, Default)]
         pub struct LengthCounterReg(u8);
         impl Debug;
         u8;
         pub timer_high, _: 2,0;
         pub length_counter_load, _: 7,3;
     }
+    #[derive(Clone, Copy, Default)]
     struct PulseReg {
         envelope: EnvelopeReg,            //$4000 / $4004
         sweep: SweepReg,                  //$4001 / $4005
         timer_low: u8,                    //$4002 / $4006
         length_counter: LengthCounterReg, //$4003 / $4007
     }
+    // impl Default for PulseReg {
+    //     fn default() -> Self {
+    //         Self {
+    //             envelope: EnvelopeReg(0),
+    //             sweep: SweepReg(0),
+    //             timer_low: 0,
+    //             length_counter: LengthCounterReg(0),
+    //         }
+    //     }
+    // }
 
     /* Length counter halt / linear counter control (C), linear counter load (R) */
     bitfield! {
+        #[derive(Default)]
         pub struct LinearCounterReg(u8);
         impl Debug;
         u8;
         pub linear_counter , _: 6,0;
         pub control, _: 7;
     }
+    #[derive(Default)]
     struct TriangleReg {
         linear_counter: LinearCounterReg, //$4008
         unsed: u8,                        //$4009
@@ -1525,12 +1541,14 @@ pub mod apu {
 
     /* L--- PPPP 	Loop noise (L), noise period (P)  */
     bitfield! {
+        #[derive(Default)]
         pub struct PeriodReg(u8);
         impl Debug;
         u8;
         pub period , _: 3,0;
         pub loop_en, _: 7;
     }
+    #[derive(Default)]
     struct NoiseReg {
         /* --LC VVVV 	Envelope loop / length counter halt (L), constant volume (C), volume/envelope (V) */
         envelope: EnvelopeReg, //$400C; bit 7, 6 not used.
@@ -1541,6 +1559,7 @@ pub mod apu {
 
     /*  IL-- RRRR 	IRQ enable (I), loop (L), frequency (R) */
     bitfield! {
+        #[derive(Default)]
         pub struct FrequencyReg(u8);
         impl Debug;
         u8;
@@ -1548,6 +1567,7 @@ pub mod apu {
         pub loop_en, _: 6;
         pub irq_en, _: 7;
     }
+    #[derive(Default)]
     struct DmcReg {
         frequency: FrequencyReg, //$4010
         load_counter: u8,        //$4011
@@ -1558,6 +1578,7 @@ pub mod apu {
     /*wtite: ---D NT21 	Enable DMC (D), noise (N), triangle (T), and pulse channels (2/1)
     read:  IF-D NT21 	DMC interrupt (I), frame interrupt (F), DMC active (D), length counter > 0 (N/T/2/1) */
     bitfield! {
+        #[derive(Default)]
         pub struct ControlReg(u8);
         impl Debug;
         u8;
@@ -1568,16 +1589,23 @@ pub mod apu {
         pub dmc_en, _: 4;
     }
 
-    #[repr(C)]
+    bitfield! {
+        #[derive(Default)]
+        pub struct FramCntCtrl(u8);
+        impl Debug;
+        u8;
+        pub irq_inhibit_flag, _: 6;
+        pub mode, _: 7;
+    }
+
+    #[derive(Default)]
     struct Register {
-        pulse: [PulseReg; 2],  //$4000~$4003, $4004~$4007
-        triangle: TriangleReg, //$4008~$400b
-        noise: NoiseReg,       //$400c~$400f
-        dmc: DmcReg,           //$4010~$4013
-        unsed1: u8,
-        sta_ctrl: ControlReg, //$4015
-        unsed2: u8,
-        frame_counter_ctrl: u8, //$4017
+        pulse: [PulseReg; 2],            //$4000~$4003, $4004~$4007
+        triangle: TriangleReg,           //$4008~$400b
+        noise: NoiseReg,                 //$400c~$400f
+        dmc: DmcReg,                     //$4010~$4013
+        sta_ctrl: ControlReg,            //$4015
+        frame_counter_ctrl: FramCntCtrl, //$4017
     }
 
     pub fn read_reg(reg: &[u8; 0x18], _addr: u16) -> u8 {
@@ -1693,9 +1721,8 @@ pub mod apu {
         sweep_div: Counter,
         volume: u8,
         blip: BlipData,
-        duty_id: u8,
+        seque_id: u8,
     }
-
     impl PulseDev {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
             Self {
@@ -1705,28 +1732,243 @@ pub mod apu {
                 sweep_div: Default::default(),
                 volume: 0,
                 blip: BlipData::new(cpu_clock_hz, sample_rate),
-                duty_id: 0,
+                seque_id: 0,
+            }
+        }
+    }
+
+    pub struct TriangleDev {
+        freq_div: Counter,
+        length_counter: u8,
+        line_counter: u8,
+        line_cnt_reload_flag: bool,
+        blip: BlipData,
+        seque_id: u8,
+    }
+    impl TriangleDev {
+        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+            Self {
+                freq_div: Default::default(),
+                length_counter: 0,
+                line_counter: 0,
+                line_cnt_reload_flag: false,
+                blip: BlipData::new(cpu_clock_hz, sample_rate),
+                seque_id: 0,
+            }
+        }
+    }
+
+    pub struct NoiseDev {
+        freq_div: Counter,
+        evelope_div: Counter,
+        length_counter: u8,
+        blip: BlipData,
+        volume: u8,
+        shift: u16,
+    }
+    impl NoiseDev {
+        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+            Self {
+                freq_div: Default::default(),
+                evelope_div: Default::default(),
+                length_counter: 0,
+                blip: BlipData::new(cpu_clock_hz, sample_rate),
+                volume: 0,
+                shift: 1,
+            }
+        }
+    }
+
+    pub struct DmcDev {
+        freq_div: Counter,
+        blip: BlipData,
+        load_counter: u8,
+        sample_address: u16,
+        sample_length: u16,
+    }
+    impl DmcDev {
+        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+            Self {
+                freq_div: Default::default(),
+                blip: BlipData::new(cpu_clock_hz, sample_rate),
+                load_counter: 0,
+                sample_address: 0,
+                sample_length: 0,
             }
         }
     }
 
     pub struct Apu {
-        reg: [u8; 0x18],
-        pub cpu_clock_hz: u32,
-        pub frame_counter: u8,
-        pub pulse: [PulseDev; 2],
+        reg: Register,
+        set_wave_reg: [fn(&mut Self, u8); 24],
+        cpu_clock_hz: u32,
+        frame_counter: u8,
+        pulse: [PulseDev; 2],
+        triangle: TriangleDev,
+        noise: NoiseDev,
+        dmc: DmcDev,
+        tv_system: u8,
+    }
+    fn set_reg_nop(_: &mut Apu, _: u8) {}
+    fn set_psulse_0(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.pulse[0].envelope.0 = val;
+        if apu_dev.reg.pulse[0].envelope.constant_volume() {
+            apu_dev.pulse[0].evelope_div.period = apu_dev.reg.pulse[0].envelope.volume() as u16 + 1;
+            apu_dev.pulse[0].evelope_div.counter = apu_dev.pulse[0].evelope_div.period;
+        } else {
+            apu_dev.pulse[0].volume = apu_dev.reg.pulse[0].envelope.volume();
+        }
+    }
+    fn set_psulse_1(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.pulse[0].sweep.0 = val;
+        apu_dev.pulse[0].sweep_div.period = apu_dev.reg.pulse[0].sweep.period() as u16 + 1;
+        apu_dev.pulse[0].sweep_div.counter = apu_dev.pulse[0].sweep_div.period;
+    }
+    fn set_psulse_2(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.pulse[0].timer_low = val;
+        apu_dev.pulse[0].freq_div.period = (apu_dev.pulse[0].freq_div.period & 0x700) | val as u16;
+    }
+    fn set_psulse_3(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.pulse[0].length_counter.0 = val;
+        apu_dev.pulse[0].freq_div.period =
+            (apu_dev.pulse[0].freq_div.period & 0x00ff) | ((val as u16 & 0x7) << 3);
+
+        if apu_dev.reg.sta_ctrl.pulse1_en() {
+            apu_dev.pulse[0].length_counter = LENGTH_COUNTER_TBL
+                [apu_dev.reg.pulse[0].length_counter.length_counter_load() as usize];
+            apu_dev.pulse[0].evelope_div.counter = 0;
+            apu_dev.pulse[0].seque_id = 0;
+        }
+    }
+    fn set_psulse_4(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.pulse[1].envelope.0 = val;
+        if apu_dev.reg.pulse[1].envelope.constant_volume() {
+            apu_dev.pulse[1].evelope_div.period = apu_dev.reg.pulse[1].envelope.volume() as u16 + 1;
+            apu_dev.pulse[1].evelope_div.counter = apu_dev.pulse[1].evelope_div.period;
+        } else {
+            apu_dev.pulse[1].volume = apu_dev.reg.pulse[1].envelope.volume();
+        }
+    }
+    fn set_psulse_5(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.pulse[1].sweep.0 = val;
+        apu_dev.pulse[1].sweep_div.period = apu_dev.reg.pulse[1].sweep.period() as u16 + 1;
+        apu_dev.pulse[1].sweep_div.counter = apu_dev.pulse[1].sweep_div.period;
+    }
+    fn set_psulse_6(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.pulse[1].timer_low = val;
+        apu_dev.pulse[1].freq_div.period = (apu_dev.pulse[1].freq_div.period & 0x700) | val as u16;
+    }
+    fn set_psulse_7(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.pulse[1].length_counter.0 = val;
+        apu_dev.pulse[1].freq_div.period =
+            (apu_dev.pulse[1].freq_div.period & 0x00ff) | ((val as u16 & 0x7) << 3);
+        if apu_dev.reg.sta_ctrl.pulse1_en() {
+            apu_dev.pulse[1].length_counter = LENGTH_COUNTER_TBL
+                [apu_dev.reg.pulse[1].length_counter.length_counter_load() as usize];
+            apu_dev.pulse[1].evelope_div.counter = 0;
+            apu_dev.pulse[1].seque_id = 0;
+        }
+    }
+    fn set_triangle_8(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.triangle.linear_counter.0 = val;
+        apu_dev.triangle.line_counter = apu_dev.reg.triangle.linear_counter.linear_counter();
+    }
+    fn set_triangle_10(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.triangle.timer_low = val;
+        apu_dev.triangle.freq_div.period = (apu_dev.triangle.freq_div.period & 0x700) | val as u16;
+    }
+    fn set_triangle_11(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.triangle.length_counter.0 = val;
+        apu_dev.triangle.freq_div.period =
+            (apu_dev.triangle.freq_div.period & 0x00ff) | ((val as u16 & 0x7) << 3);
+        if apu_dev.reg.sta_ctrl.pulse1_en() {
+            apu_dev.triangle.length_counter = LENGTH_COUNTER_TBL
+                [apu_dev.reg.triangle.length_counter.length_counter_load() as usize];
+            apu_dev.triangle.line_cnt_reload_flag = true;
+        }
+    }
+    fn set_noise_12(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.noise.envelope.0 = val;
+        if apu_dev.reg.noise.envelope.constant_volume() {
+            apu_dev.noise.evelope_div.period = apu_dev.reg.noise.envelope.volume() as u16 + 1;
+            apu_dev.noise.evelope_div.counter = apu_dev.noise.evelope_div.period;
+        } else {
+            apu_dev.noise.volume = apu_dev.reg.noise.envelope.volume();
+        }
+    }
+    fn set_noise_14(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.noise.period.0 = val;
+        apu_dev.noise.freq_div.period =
+            NOISE_FREQUENCE_TBL[apu_dev.tv_system as usize][val as usize];
+    }
+    fn set_noise_15(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.noise.length_counter = val >> 3;
+        if apu_dev.reg.sta_ctrl.noise_en() {
+            apu_dev.noise.length_counter =
+                LENGTH_COUNTER_TBL[apu_dev.reg.noise.length_counter as usize];
+            apu_dev.noise.evelope_div.counter = 0;
+        }
+    }
+    fn set_dmc_16(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.dmc.frequency.0 = val;
+        apu_dev.dmc.freq_div.period = DMC_FREQUENCE_TBL[apu_dev.tv_system as usize]
+            [apu_dev.reg.dmc.frequency.frequency() as usize];
+    }
+    fn set_dmc_17(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.dmc.load_counter = val & 0x7f;
+    }
+    fn set_dmc_18(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.dmc.sample_address = val;
+        apu_dev.dmc.sample_address = ((val as u16)<<6) | 0xc000;
+    }
+    fn set_dmc_19(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.dmc.sample_length = val;
+        apu_dev.dmc.sample_length = ((val as u16)<<4) | 1;
+    }
+    fn set_status_ctrl_21(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.sta_ctrl.0 = val;
+
+        if apu_dev.reg.sta_ctrl.pulse1_en() == false {
+            apu_dev.pulse[0].length_counter = 0;
+        }
+        if apu_dev.reg.sta_ctrl.pulse2_en() == false {
+            apu_dev.pulse[1].length_counter = 0;
+        }
+        if apu_dev.reg.sta_ctrl.triangle_en() == false {
+            apu_dev.triangle.length_counter = 0;
+        }
+        if apu_dev.reg.sta_ctrl.noise_en() == false {
+            apu_dev.noise.length_counter = 0;
+        }
+    }
+    fn set_frame_counter_23(apu_dev: &mut Apu, val: u8) {
+        apu_dev.reg.frame_counter_ctrl.0 = val;
     }
 
     impl Apu {
-        pub fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+        // tv_system: 0 NTSC, 1 PAL
+        pub fn new(cpu_clock_hz: u32, sample_rate: u32, tv_system: u8) -> Self {
             Apu {
-                reg: [0; 0x18],
+                reg: Default::default(),
+                #[rustfmt::skip]
+                set_wave_reg: [
+                    set_psulse_0, set_psulse_1, set_psulse_2, set_psulse_3,
+                    set_psulse_4, set_psulse_5, set_psulse_6, set_psulse_7,
+                    set_triangle_8, set_reg_nop, set_triangle_10, set_triangle_11,
+                    set_noise_12, set_reg_nop, set_noise_14, set_noise_15,
+                    set_dmc_16, set_dmc_17, set_dmc_18, set_dmc_19,
+                    set_reg_nop, set_status_ctrl_21, set_reg_nop, set_frame_counter_23,
+                ],
                 cpu_clock_hz,
                 frame_counter: 0,
                 pulse: [
                     PulseDev::new(cpu_clock_hz, sample_rate),
                     PulseDev::new(cpu_clock_hz, sample_rate),
                 ],
+                triangle: TriangleDev::new(cpu_clock_hz, sample_rate),
+                noise: NoiseDev::new(cpu_clock_hz, sample_rate),
+                dmc: DmcDev::new(cpu_clock_hz, sample_rate),
+                tv_system,
             }
         }
 
@@ -1741,69 +1983,90 @@ pub mod apu {
                             v            v             v
         Envelope --------> Gate ------> Gate -------> Gate ---> (to mixer)
         *******************************************************************/
-        fn generate_pulse_wave(&mut self, apu_reg: &Register, cpu_ticks: u32) {
-            for i in 0..2 {
-                // envelope
-                if apu_reg.pulse[i].envelope.constant_volume() == false {
-                    let volume = &mut self.pulse[i].volume;
-                    self.pulse[i].evelope_div.count_once(|div| {
-                        div.counter = div.period;
-                        if *volume == 0 {
-                            if apu_reg.pulse[i].envelope.envelope_loop() == true {
-                                *volume = 15;
-                            }
-                        } else {
-                            *volume -= 1;
-                        }
-                    });
-                }
-                // length count
-                if ((apu_reg.sta_ctrl.0 & 1 << i) != 0) && (apu_reg.pulse[i].envelope.envelope_loop() == false) {
-                    if self.pulse[i].length_counter > 0 {
-                        self.pulse[i].length_counter -= 1;
-                    }
-                }
-                // sweep
-                if apu_reg.pulse[i].sweep.enabled() == true && apu_reg.pulse[i].sweep.shift() != 0 {
-                    if self.pulse[i].freq_div.counter > 7 && self.pulse[i].freq_div.counter < 2048 {
-                        let mut timer = self.pulse[i].freq_div.counter;
-                        self.pulse[i].sweep_div.count_once(|div| {
-                            div.counter = div.period;
-                            let result = timer >> apu_reg.pulse[i].sweep.shift();
-                            if apu_reg.pulse[i].sweep.negate() {
-                                timer = timer.saturating_sub(result + 1 - i as u16);
-                            } else {
-                                timer = timer + result;
-                            }
-                        });
-                        self.pulse[i].freq_div.counter = timer;
-                        self.pulse[i].freq_div.period = timer;
-                    }
-                }
+        #[inline(always)]
+        fn trig_pulse_envelope(&mut self, pulse_id: usize) {
+            let apu_reg: &Register = &self.reg;
+            let pulse = &mut self.pulse[pulse_id];
 
-                let blip = &mut self.pulse[i].blip;
-                let period = self.pulse[i].freq_div.period as u32;
-                let vl = if ((apu_reg.sta_ctrl.0 & 1 << i) == 0)
-                    || (self.pulse[i].length_counter == 0)
-                    || (self.pulse[i].freq_div.period < 8)
-                    || (self.pulse[i].freq_div.period > 0x7ff)
-                {
-                    0
-                } else {
-                    let duty_id = self.pulse[i].duty_id as usize;
-                    self.pulse[i].duty_id = (self.pulse[i].duty_id + 1) & 0x7;
-                    if PULSE_WAVE_DUTY_TBL[apu_reg.pulse[i].envelope.duty() as usize][duty_id] == 0 {
-                        0
+            if apu_reg.pulse[pulse_id].envelope.constant_volume() == false {
+                let volume = &mut pulse.volume;
+                pulse.evelope_div.count_once(|div| {
+                    div.counter = div.period;
+                    if *volume == 0 {
+                        if apu_reg.pulse[pulse_id].envelope.envelope_loop() == true {
+                            *volume = 15;
+                        }
                     } else {
-                        self.pulse[i].volume as i32
-                    }
-                };
-                self.pulse[i].freq_div.count(cpu_ticks / 2, |_, n| {
-                    for _ in 0..n {
-                        blip.fill(blip.tick + 2 * period, vl);
+                        *volume -= 1;
                     }
                 });
             }
+        }
+        #[inline(always)]
+        fn trig_pulse_length(&mut self, pulse_id: usize) {
+            let apu_reg: &Register = &self.reg;
+            let pulse = &mut self.pulse[pulse_id];
+
+            if ((apu_reg.sta_ctrl.0 & 1 << pulse_id) != 0)
+                && (apu_reg.pulse[pulse_id].envelope.envelope_loop() == false)
+            {
+                if pulse.length_counter > 0 {
+                    pulse.length_counter -= 1;
+                }
+            }
+        }
+        #[inline(always)]
+        fn trig_pulse_sweep(&mut self, pulse_id: usize) {
+            let apu_reg: &Register = &self.reg;
+            let pulse = &mut self.pulse[pulse_id];
+
+            if apu_reg.pulse[pulse_id].sweep.enabled() == true
+                && apu_reg.pulse[pulse_id].sweep.shift() != 0
+            {
+                if pulse.freq_div.counter > 7 && pulse.freq_div.counter < 2048 {
+                    let mut timer = pulse.freq_div.counter;
+                    pulse.sweep_div.count_once(|div| {
+                        div.counter = div.period;
+                        let result = timer >> apu_reg.pulse[pulse_id].sweep.shift();
+                        if apu_reg.pulse[pulse_id].sweep.negate() {
+                            timer = timer.saturating_sub(result + 1 - pulse_id as u16);
+                        } else {
+                            timer = timer + result;
+                        }
+                    });
+                    pulse.freq_div.counter = timer;
+                    pulse.freq_div.period = timer;
+                }
+            }
+        }
+        #[inline(always)]
+        fn trig_pulse_timer(&mut self, pulse_id: usize, cpu_ticks: u32) {
+            let apu_reg: &Register = &self.reg;
+            let pulse = &mut self.pulse[pulse_id];
+
+            let blip = &mut pulse.blip;
+            let period = pulse.freq_div.period as u32;
+            let vl = if ((apu_reg.sta_ctrl.0 & 1 << pulse_id) == 0)
+                || (pulse.length_counter == 0)
+                || (pulse.freq_div.period < 8)
+                || (pulse.freq_div.period > 0x7ff)
+            {
+                0
+            } else {
+                pulse.volume as i32
+            };
+            let seque_id = &mut pulse.seque_id;
+            let duty_id = apu_reg.pulse[pulse_id].envelope.duty() as usize;
+            //timer
+            pulse.freq_div.count(cpu_ticks / 2, |_, n| {
+                for _ in 0..n {
+                    blip.fill(
+                        blip.tick + 2 * period,
+                        PULSE_SEQUENCE_DUTY_TBL[duty_id][*seque_id as usize] as i32 * vl,
+                    );
+                    *seque_id = (*seque_id + 1) & 0x7;
+                }
+            });
         }
 
         /*********************** Triangle channel **************************
@@ -1812,26 +2075,240 @@ pub mod apu {
                     v                v
         Timer ---> Gate ----------> Gate ---> Sequencer ---> (to mixer)
         *******************************************************************/
-        fn generate_triangle_wave(&mut self, apu_reg: &Register, cpu_ticks: u32) {
+        #[inline(always)]
+        fn trig_triangle_length(&mut self) {
+            let triangle = &mut self.triangle;
+            let apu_reg: &Register = &self.reg;
+
+            // length count
+            if apu_reg.sta_ctrl.triangle_en()
+                && (apu_reg.triangle.linear_counter.control() == false)
+            {
+                if triangle.length_counter > 0 {
+                    triangle.length_counter -= 1;
+                }
+            }
+        }
+        #[inline(always)]
+        fn trig_triangle_line(&mut self) {
+            let triangle = &mut self.triangle;
+            let apu_reg: &Register = &self.reg;
+
+            if apu_reg.sta_ctrl.triangle_en() {
+                if apu_reg.triangle.linear_counter.control() == false {
+                    triangle.line_cnt_reload_flag = false;
+                    if triangle.line_counter > 0 {
+                        triangle.line_counter -= 1;
+                    }
+                }
+                if triangle.line_cnt_reload_flag {
+                    triangle.line_counter = apu_reg.triangle.length_counter.length_counter_load();
+                }
+            }
+        }
+        #[inline(always)]
+        fn trig_triangle_timer(&mut self, cpu_ticks: u32) {
+            let triangle = &mut self.triangle;
+            let apu_reg: &Register = &self.reg;
+
+            let blip = &mut triangle.blip;
+            let period = triangle.freq_div.period as u32;
+            let mute = if (apu_reg.sta_ctrl.triangle_en() == false)
+                || (triangle.length_counter == 0)
+                || (triangle.freq_div.period <= 2)
+            {
+                true
+            } else {
+                false
+            };
+            //timer
+            triangle.freq_div.count(cpu_ticks, |_, n| {
+                if mute {
+                    for _ in 0..n {
+                        blip.fill(blip.tick + period, 0);
+                    }
+                } else {
+                    for _ in 0..n {
+                        blip.fill(
+                            blip.tick + period,
+                            TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize] as i32,
+                        );
+                        triangle.seque_id = (triangle.seque_id + 1) & 0x1f;
+                    }
+                }
+            });
         }
 
-        pub fn frame_counter_trig(&mut self) {
+        /*********************** Noise channel **************************
+                Timer --> Shift Register   Length Counter
+                                |                |
+                                v                v
+            Envelope -------> Gate ----------> Gate --> (to mixer)
+        *******************************************************************/
+        #[inline(always)]
+        fn trig_noise_envelope(&mut self) {
+            let apu_reg: &Register = &self.reg;
+            let noise = &mut self.noise;
+
+            if apu_reg.noise.envelope.constant_volume() == false {
+                let volume = &mut noise.volume;
+                noise.evelope_div.count_once(|div| {
+                    div.counter = div.period;
+                    if *volume == 0 {
+                        if apu_reg.noise.envelope.envelope_loop() == true {
+                            *volume = 15;
+                        }
+                    } else {
+                        *volume -= 1;
+                    }
+                });
+            }
+        }
+        #[inline(always)]
+        fn trig_noise_length(&mut self) {
+            let noise = &mut self.noise;
+            let apu_reg: &Register = &self.reg;
+
+            // length count
+            if apu_reg.sta_ctrl.noise_en() && (apu_reg.noise.envelope.envelope_loop() == false) {
+                if noise.length_counter > 0 {
+                    noise.length_counter -= 1;
+                }
+            }
+        }
+        #[inline(always)]
+        fn trig_noise_timer(&mut self, cpu_ticks: u32) {
+            let noise = &mut self.noise;
+            let apu_reg: &Register = &self.reg;
+
+            let blip = &mut noise.blip;
+            let period = noise.freq_div.period as u32;
+            let vl = if (apu_reg.sta_ctrl.triangle_en() == false) || (noise.length_counter == 0) {
+                0
+            } else {
+                noise.volume as i32
+            };
+            //timer
+            noise.freq_div.count(cpu_ticks, |_, n| {
+                for _ in 0..n {
+                    let feedback = if apu_reg.noise.period.loop_en() {
+                        //short mode
+                        ((noise.shift >> 6) ^ noise.shift) & 0x1
+                    } else {
+                        ((noise.shift >> 1) ^ noise.shift) & 0x1
+                    };
+                    noise.shift = (noise.shift >> 1) | (feedback << 14);
+                    let ampl = if noise.shift & 0x1 == 0 { 1 } else { 0 } * vl;
+                    blip.fill(blip.tick + period, ampl);
+                }
+            });
+        }
+
+        /*  mode 0:    mode 1:       function
+            ---------  -----------  -----------------------------
+            - - - f    - - - - -    IRQ (if bit 6 is clear)
+            - l - l    - l - - l    Length counter and sweep
+            e e e e    e e e - e    Envelope and linear counter
+        */
+        #[inline]
+        fn frame_counter_trig_mode0(&mut self) {
             let cpu_now_cycles = get_cpu_cycles();
-            let apu_reg = unsafe { std::mem::transmute::<&[u8; 0x18], &Register>(&self.reg) };
 
-            self.generate_pulse_wave(apu_reg, cpu_now_cycles);
+            if (self.frame_counter & 0x1) == 0x1 {
+                self.trig_pulse_length(0);
+                self.trig_pulse_length(1);
+                self.trig_pulse_sweep(0);
+                self.trig_pulse_sweep(1);
+                self.trig_triangle_length();
+                self.trig_noise_length();
+            } else if self.frame_counter == 3 {
+                //IRQ
+            }
+            self.trig_pulse_envelope(0);
+            self.trig_pulse_envelope(1);
+            self.trig_triangle_line();
 
+            self.trig_pulse_timer(0, cpu_now_cycles);
+            self.trig_pulse_timer(1, cpu_now_cycles);
+            self.trig_triangle_timer(cpu_now_cycles);
+            self.trig_noise_timer(cpu_now_cycles);
+
+            self.frame_counter = (self.frame_counter + 1) & 0x3;
+        }
+        #[inline]
+        fn frame_counter_trig_mode1(&mut self) {
+            let cpu_now_cycles = get_cpu_cycles();
+
+            if self.frame_counter == 0x1 || self.frame_counter == 0x4 {
+                self.trig_pulse_length(0);
+                self.trig_pulse_length(1);
+                self.trig_pulse_sweep(0);
+                self.trig_pulse_sweep(1);
+                self.trig_triangle_length();
+                self.trig_noise_length();
+            }
+            if self.frame_counter != 3 {
+                self.trig_pulse_envelope(0);
+                self.trig_pulse_envelope(1);
+                self.trig_triangle_line();
+            }
+            self.trig_pulse_timer(0, cpu_now_cycles);
+            self.trig_pulse_timer(1, cpu_now_cycles);
+            self.trig_triangle_timer(cpu_now_cycles);
+            self.trig_noise_timer(cpu_now_cycles);
+
+            self.frame_counter += 1;
+            if self.frame_counter > 4 {
+                self.frame_counter = 0;
+            }
+        }
+        pub fn frame_counter_trig(&mut self) {
+            /*  mode 0:    mode 1:       function
+                ---------  -----------  -----------------------------
+                - - - f    - - - - -    IRQ (if bit 6 is clear)
+                - l - l    - l - - l    Length counter and sweep
+                e e e e    e e e - e    Envelope and linear counter
+            */
+            if self.reg.frame_counter_ctrl.mode() {
+                self.frame_counter_trig_mode1();
+            } else {
+                self.frame_counter_trig_mode0();
+            }
         }
     }
 
-    const PULSE_LENGTH_COUNTER_TBL: [u8; 32] = [
+    const LENGTH_COUNTER_TBL: [u8; 32] = [
         10, 254, 20, 2, 40, 4, 80, 6, 160, 8, 60, 10, 14, 12, 26, 14, 12, 16, 24, 18, 48, 20, 96,
         22, 192, 24, 72, 26, 16, 28, 32, 30,
     ];
-    const PULSE_WAVE_DUTY_TBL: [[u8; 8]; 4] = [
+    const PULSE_SEQUENCE_DUTY_TBL: [[u8; 8]; 4] = [
         [0, 1, 0, 0, 0, 0, 0, 0],
         [0, 1, 1, 0, 0, 0, 0, 0],
         [0, 1, 1, 1, 1, 0, 0, 0],
         [1, 0, 0, 1, 1, 1, 1, 1],
+    ];
+    const TRIANGLE_SEQUENCE_TBL: [u8; 32] = [
+        15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        12, 13, 14, 15,
+    ];
+    const NOISE_FREQUENCE_TBL: [[u16; 16]; 2] = [
+        //0 NTSC
+        [
+            4, 8, 16, 32, 64, 96, 128, 160, 202, 254, 380, 508, 762, 1016, 2034, 4068,
+        ],
+        //1 PAL
+        [
+            4, 8, 14, 30, 60, 88, 118, 148, 188, 236, 354, 472, 708, 944, 1890, 3778,
+        ],
+    ];
+    const DMC_FREQUENCE_TBL: [[u16; 16]; 2] = [
+        //0 NTSC
+        [
+            428, 380, 340, 320, 286, 254, 226, 214, 190, 160, 142, 128, 106, 84, 72, 54,
+        ],
+        //1 PAL
+        [
+            398, 354, 316, 298, 276, 236, 210, 198, 176, 148, 132, 118, 98, 78, 66, 50,
+        ],
     ];
 }
