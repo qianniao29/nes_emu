@@ -1,39 +1,6 @@
 #![allow(dead_code)]
 
-pub mod cpu {
-    use crate::cpu2a03::apu;
-    use crate::ppu2c02::ppu;
-    /*
-    address         size 	  describe
-    $0000–$07FF 	$0800 	2 KB internal RAM
-    $0800–$0FFF 	$0800 	Mirrors of $0000–$07FF
-    $1000–$17FF 	$0800 	Mirrors of $0000–$07FF
-    $1800–$1FFF 	$0800 	Mirrors of $0000–$07FF
-    $2000–$2007 	$0008 	NES PPU registers
-    $2008–$3FFF 	$1FF8 	Mirrors of $2000–$2007 (repeats every 8 bytes)
-    $4000–$4017 	$0018 	NES APU and I/O registers
-    $4018–$401F 	$0008 	APU and I/O functionality that is normally disabled. See CPU Test Mode.
-    $4020–$FFFF 	$BFE0 	Cartridge space: PRG ROM, PRG RAM, and mapper registers
-
-    $4020 	$1FDF 		Expansion ROM
-    $6000 	$2000 		SRAM
-    $8000 	$4000 		PRG-ROM
-    $C000 	$4000 		PRG-ROM
-    */
-
-    pub const NMI_VECT_ADDR: u16 = 0xFFFA;
-    pub const REST_VECT_ADDR: u16 = 0xFFFC;
-    pub const BRK_VECT_ADDR: u16 = 0xFFFE;
-
-    pub const KEY_A: usize = 0;
-    pub const KEY_B: usize = 1;
-    pub const KEY_SELECT: usize = 2;
-    pub const KEY_START: usize = 3;
-    pub const KEY_UP: usize = 4;
-    pub const KEY_DOWN: usize = 5;
-    pub const KEY_LEFT: usize = 6;
-    pub const KEY_RIGHT: usize = 7;
-
+pub mod cycle {
     static mut CPU_CYCLES: u32 = 0;
 
     pub fn cpu_cycles_reset() {
@@ -51,11 +18,17 @@ pub mod cpu {
     pub fn get_cpu_cycles() -> u32 {
         unsafe { CPU_CYCLES }
     }
+}
+
+pub mod memory {
+    use crate::cpu2a03::apu;
+    use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
+    use crate::ppu2c02::ppu;
 
     pub struct MemMap<'a> {
         pub ram: [u8; 0x800],
         pub ppu_reg: ppu::Register,
-        pub apu_reg: [u8; 0x18],
+        pub apu_mem: apu::Apu,
         pub sram: [u8; 0x2000], // save RAM
         pub prg_rom: [&'a [u8]; 4],
         pub key: [[u8; 8]; 2],
@@ -63,40 +36,12 @@ pub mod cpu {
         pub ppu_mem: ppu::MemMap,
     }
 
-    fn dma_write(mem: &mut MemMap, addr_dma: u16) {
-        let offset: usize = (addr_dma & 0x1f00).into();
-        let base = addr_dma >> 13;
-        let src = match base {
-            0 => {
-                let mirror = offset & 0x7ff;
-                &mem.ram[mirror..mirror + 256]
-            }
-            3 => &mem.sram[offset..offset + 256],
-            4 | 5 | 6 | 7 => &mem.prg_rom[base as usize - 4][offset..256],
-            1 | 2 => {
-                unimplemented!("Can't be operating by DMA.");
-            }
-            _ => unreachable!("Out of memory range!"),
-        };
-        if mem.ppu_reg.oam_addr == 0 {
-            mem.ppu_mem.oam.clone_from_slice(src);
-        } else {
-            let off = (255 - mem.ppu_reg.oam_addr + 1) as usize;
-            mem.ppu_mem.oam[mem.ppu_reg.oam_addr as usize..=255].clone_from_slice(&src[..off]);
-            mem.ppu_mem.oam[..mem.ppu_reg.oam_addr as usize].clone_from_slice(&src[off..]);
-        }
-        cpu_cycles_add(513);
-        if get_cpu_cycles() & 0x1 == 0x1 {
-            cpu_cycles_add(1);
-        }
-    }
-
     impl MemMap<'_> {
-        pub fn new() -> Self {
+        pub fn new(cpu_clock_hz: u32, apu_sample_rate: u32, tv_system: u8) -> Self {
             MemMap {
                 ram: [0; 0x800],
                 ppu_reg: ppu::Register::new(),
-                apu_reg: [0; 0x18],
+                apu_mem: apu::Apu::new(cpu_clock_hz, apu_sample_rate, tv_system),
                 key: [[0; 8]; 2],
                 key_indx: [0; 2],
                 sram: [0; 0x2000],
@@ -134,7 +79,7 @@ pub mod cpu {
                             }
                             val
                         } else if addr == 0x4015 {
-                            apu::read_reg(&self.apu_reg, addr)
+                            self.apu_mem.get_wave_reg(addr)
                         } else {
                             0
                         }
@@ -166,7 +111,7 @@ pub mod cpu {
                             self.key_indx[1] = 0;
                         }
                     } else if addr < 0x4020 {
-                        apu::write_reg(&mut self.apu_reg, addr, val);
+                        self.apu_mem.set_wave_reg[(addr & 0x1f) as usize](&mut self.apu_mem, val);
                     }
                 }
                 3 => {
@@ -176,6 +121,35 @@ pub mod cpu {
                     unimplemented!("Rom can't be written.");
                 }
                 _ => unreachable!("Out of memory range!"),
+            }
+
+            fn dma_write(mem: &mut MemMap, addr_dma: u16) {
+                let offset: usize = (addr_dma & 0x1f00).into();
+                let base = addr_dma >> 13;
+                let src = match base {
+                    0 => {
+                        let mirror = offset & 0x7ff;
+                        &mem.ram[mirror..mirror + 256]
+                    }
+                    3 => &mem.sram[offset..offset + 256],
+                    4 | 5 | 6 | 7 => &mem.prg_rom[base as usize - 4][offset..256],
+                    1 | 2 => {
+                        unimplemented!("Can't be operating by DMA.");
+                    }
+                    _ => unreachable!("Out of memory range!"),
+                };
+                if mem.ppu_reg.oam_addr == 0 {
+                    mem.ppu_mem.oam.clone_from_slice(src);
+                } else {
+                    let off = (255 - mem.ppu_reg.oam_addr + 1) as usize;
+                    mem.ppu_mem.oam[mem.ppu_reg.oam_addr as usize..=255]
+                        .clone_from_slice(&src[..off]);
+                    mem.ppu_mem.oam[..mem.ppu_reg.oam_addr as usize].clone_from_slice(&src[off..]);
+                }
+                cpu_cycles_add(513);
+                if get_cpu_cycles() & 0x1 == 0x1 {
+                    cpu_cycles_add(1);
+                }
             }
         }
 
@@ -189,6 +163,42 @@ pub mod cpu {
             self.ram[0x100 + *sp_piont as usize]
         }
     }
+}
+
+pub mod cpu {
+    use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
+    use crate::cpu2a03::memory::MemMap;
+
+    /*
+    address         size 	  describe
+    $0000–$07FF 	$0800 	2 KB internal RAM
+    $0800–$0FFF 	$0800 	Mirrors of $0000–$07FF
+    $1000–$17FF 	$0800 	Mirrors of $0000–$07FF
+    $1800–$1FFF 	$0800 	Mirrors of $0000–$07FF
+    $2000–$2007 	$0008 	NES PPU registers
+    $2008–$3FFF 	$1FF8 	Mirrors of $2000–$2007 (repeats every 8 bytes)
+    $4000–$4017 	$0018 	NES APU and I/O registers
+    $4018–$401F 	$0008 	APU and I/O functionality that is normally disabled. See CPU Test Mode.
+    $4020–$FFFF 	$BFE0 	Cartridge space: PRG ROM, PRG RAM, and mapper registers
+
+    $4020 	$1FDF 		Expansion ROM
+    $6000 	$2000 		SRAM
+    $8000 	$4000 		PRG-ROM
+    $C000 	$4000 		PRG-ROM
+    */
+
+    pub const NMI_VECT_ADDR: u16 = 0xFFFA;
+    pub const REST_VECT_ADDR: u16 = 0xFFFC;
+    pub const BRK_VECT_ADDR: u16 = 0xFFFE;
+
+    pub const KEY_A: usize = 0;
+    pub const KEY_B: usize = 1;
+    pub const KEY_SELECT: usize = 2;
+    pub const KEY_START: usize = 3;
+    pub const KEY_UP: usize = 4;
+    pub const KEY_DOWN: usize = 5;
+    pub const KEY_LEFT: usize = 6;
+    pub const KEY_RIGHT: usize = 7;
 
     use bitfield;
     use bitflags::bitflags;
@@ -974,7 +984,7 @@ pub mod cpu {
                 //---  组合指令  ----------
                 Instruction::ASR | Instruction::ALR => {
                     // [Unofficial&Combo] AND+LSR
-                    //= SFC_INS_ALR{}// 有消息称是叫这个
+                    //= SFC_INS_ALR{}
                     cpu_reg.a &= mem.read_memeory(addr);
                     cpu_reg.p.check_set_c(cpu_reg.a & 0x1);
                     cpu_reg.a >>= 1;
@@ -1465,9 +1475,11 @@ pub mod cpu {
 }
 
 pub mod apu {
+    use bitfield::{Bit, BitMut};
     use blip_buf::BlipBuf;
 
-    use crate::cpu::get_cpu_cycles;
+    use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
+    use crate::cpu2a03::memory::MemMap;
 
     /* DDLC VVVV
      Duty (D),
@@ -1570,7 +1582,7 @@ pub mod apu {
     #[derive(Default)]
     struct DmcReg {
         frequency: FrequencyReg, //$4010
-        load_counter: u8,        //$4011
+        direct_load: u8,         //$4011
         sample_address: u8,      //$4012
         sample_length: u8,       //$4013
     }
@@ -1606,59 +1618,6 @@ pub mod apu {
         dmc: DmcReg,                     //$4010~$4013
         sta_ctrl: ControlReg,            //$4015
         frame_counter_ctrl: FramCntCtrl, //$4017
-    }
-
-    pub fn read_reg(reg: &[u8; 0x18], _addr: u16) -> u8 {
-        // let offset = (addr & 0x1f) as usize;
-        reg[0x15]
-    }
-
-    pub fn write_reg(reg: &mut [u8; 0x18], addr: u16, val: u8) {
-        let offset = (addr & 0x1f) as usize;
-        reg[offset] = val;
-        // let t = unsafe {
-        //     std::mem::transmute::<&mut[u8;0x18],&Register>(reg)
-        // };
-
-        // match offset {
-        //     //pulse1
-        //     0x00 => reg.pulse1.envelope.0 = val,
-        //     0x01 => reg.pulse1.sweep.0 = val,
-        //     0x02 => reg.pulse1.timer = (reg.pulse1.timer & 0x700) | val as u16,
-        //     0x03 => {
-        //         reg.pulse1.length_counter = val >> 3;
-        //         reg.pulse1.timer = (reg.pulse1.timer & 0x00ff) | ((val as u16 & 0x7) << 3);
-        //     }
-        //     //pulse2
-        //     0x04 => reg.pulse2.envelope.0 = val,
-        //     0x05 => reg.pulse2.sweep.0 = val,
-        //     0x06 => reg.pulse2.timer = (reg.pulse2.timer & 0x700) | val as u16,
-        //     0x07 => {
-        //         reg.pulse2.length_counter = val >> 3;
-        //         reg.pulse2.timer = (reg.pulse2.timer & 0x00ff) | ((val as u16 & 0x7) << 3);
-        //     }
-        //     //triangle
-        //     0x08 => reg.triangle.linear_counter.0 = val,
-        //     0x0a => reg.triangle.timer = (reg.triangle.timer & 0x700) | val as u16,
-        //     0x0b => {
-        //         reg.triangle.length_counter = val >> 3;
-        //         reg.triangle.timer = (reg.triangle.timer & 0x00ff) | ((val as u16 & 0x7) << 3);
-        //     }
-        //     //noise
-        //     0x0c => reg.noise.envelope.0 = val,
-        //     0x0e => reg.noise.period.0 = val,
-        //     0x0f => reg.noise.length_counter = val >> 3,
-        //     //dmc
-        //     0x10 => reg.dmc.frequency.0 = val,
-        //     0x11 => reg.dmc.load_counter = val,
-        //     0x12 => reg.dmc.sample_address = val,
-        //     0x13 => reg.dmc.sample_length = val,
-        //     //status
-        //     0x15 => reg.sta_ctrl.0 = val,
-        //     //frame count
-        //     0x17 => reg.frame_counter = val,
-        //     _ => {}
-        // }
     }
 
     #[derive(Debug, Default)]
@@ -1782,25 +1741,31 @@ pub mod apu {
     pub struct DmcDev {
         freq_div: Counter,
         blip: BlipData,
-        load_counter: u8,
+        load_data: u8,
+        dac_value: u8,
         sample_address: u16,
         sample_length: u16,
+        bit_indx: u8,
+        int_flag: bool,
     }
     impl DmcDev {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
             Self {
                 freq_div: Default::default(),
                 blip: BlipData::new(cpu_clock_hz, sample_rate),
-                load_counter: 0,
+                load_data: 0,
+                dac_value: 0,
                 sample_address: 0,
                 sample_length: 0,
+                bit_indx: 8,
+                int_flag: false,
             }
         }
     }
 
     pub struct Apu {
         reg: Register,
-        set_wave_reg: [fn(&mut Self, u8); 24],
+        pub set_wave_reg: [fn(&mut Self, u8); 24],
         cpu_clock_hz: u32,
         frame_counter: u8,
         pulse: [PulseDev; 2],
@@ -1808,6 +1773,7 @@ pub mod apu {
         noise: NoiseDev,
         dmc: DmcDev,
         tv_system: u8,
+        frame_int_flag: bool,
     }
     fn set_reg_nop(_: &mut Apu, _: u8) {}
     fn set_psulse_0(apu_dev: &mut Apu, val: u8) {
@@ -1913,17 +1879,20 @@ pub mod apu {
         apu_dev.reg.dmc.frequency.0 = val;
         apu_dev.dmc.freq_div.period = DMC_FREQUENCE_TBL[apu_dev.tv_system as usize]
             [apu_dev.reg.dmc.frequency.frequency() as usize];
+        if apu_dev.reg.dmc.frequency.irq_en() == false {
+            apu_dev.dmc.int_flag = false;
+        }
     }
     fn set_dmc_17(apu_dev: &mut Apu, val: u8) {
-        apu_dev.reg.dmc.load_counter = val & 0x7f;
+        apu_dev.dmc.load_data = val & 0x7f;
     }
     fn set_dmc_18(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.dmc.sample_address = val;
-        apu_dev.dmc.sample_address = ((val as u16)<<6) | 0xc000;
+        apu_dev.dmc.sample_address = ((val as u16) << 6) | 0xc000;
     }
     fn set_dmc_19(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.dmc.sample_length = val;
-        apu_dev.dmc.sample_length = ((val as u16)<<4) | 1;
+        apu_dev.dmc.sample_length = ((val as u16) << 4) | 1;
     }
     fn set_status_ctrl_21(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.sta_ctrl.0 = val;
@@ -1940,9 +1909,16 @@ pub mod apu {
         if apu_dev.reg.sta_ctrl.noise_en() == false {
             apu_dev.noise.length_counter = 0;
         }
+        if apu_dev.reg.sta_ctrl.dmc_en() == false {
+            apu_dev.dmc.sample_length = 0;
+        }
+        apu_dev.dmc.int_flag = false;
     }
     fn set_frame_counter_23(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.frame_counter_ctrl.0 = val;
+        if apu_dev.reg.frame_counter_ctrl.irq_inhibit_flag(){
+            apu_dev.frame_int_flag = false;
+        }
     }
 
     impl Apu {
@@ -1969,7 +1945,36 @@ pub mod apu {
                 noise: NoiseDev::new(cpu_clock_hz, sample_rate),
                 dmc: DmcDev::new(cpu_clock_hz, sample_rate),
                 tv_system,
+                frame_int_flag: false,
             }
+        }
+
+        pub fn get_wave_reg(&mut self, _addr: u16) -> u8 {
+            let mut val = 0_u8;
+            if self.pulse[0].length_counter != 0 {
+                val.set_bit(0, true);
+            }
+            if self.pulse[1].length_counter != 0 {
+                val.set_bit(1, true);
+            }
+            if self.triangle.length_counter != 0 {
+                val.set_bit(2, true);
+            }
+            if self.noise.length_counter != 0 {
+                val.set_bit(3, true);
+            }
+            if self.dmc.sample_length != 0 {
+                val.set_bit(4, true);
+            }
+            if self.frame_int_flag {
+                val.set_bit(6, true);
+            }
+            if self.dmc.int_flag {
+                val.set_bit(7, true);
+            }
+            self.frame_int_flag = false;
+
+            val
         }
 
         /*********************** Pulse channel **************************
@@ -2204,6 +2209,63 @@ pub mod apu {
             });
         }
 
+        /******************************* DMC channel **********************************
+                                     Timer
+                                       |
+                                       v
+            Reader ---> Buffer ---> Shifter ---> Output level ---> (to the mixer)
+        *******************************************************************************/
+        #[inline(always)]
+        fn trig_dmc_timer(&mut self, cpu_ticks: u32, mem: &mut MemMap) {
+            let dmc = &mut self.dmc;
+            let apu_reg: &Register = &self.reg;
+
+            let blip = &mut dmc.blip;
+            let period = dmc.freq_div.period as u32;
+
+            //timer
+            dmc.freq_div.count(cpu_ticks, |_, n| {
+                let mut ampl;
+                for _ in 0..n {
+                    ampl = 0;
+                    if apu_reg.sta_ctrl.dmc_en() == true {
+                        if dmc.bit_indx == 8 {
+                            if dmc.sample_length != 0 {
+                                //read data from prgrom
+                                dmc.load_data = mem.read_memeory(dmc.sample_address);
+                                // TODO: spend cpu cycles
+                                //The address is incremented; if it exceeds $FFFF, it is wrapped around to $8000.
+                                dmc.sample_address = dmc.sample_address.saturating_add(1) | 0x8000;
+                                dmc.sample_length -= 1;
+                                dmc.bit_indx = 0;
+                            } else {
+                                if apu_reg.dmc.frequency.loop_en() {
+                                    dmc.sample_length =
+                                        ((apu_reg.dmc.sample_length as u16) << 4) | 1;
+                                    dmc.sample_address =
+                                        ((apu_reg.dmc.sample_address as u16) << 6) | 0xc000;
+                                } else if apu_reg.dmc.frequency.irq_en() {
+                                    dmc.int_flag = true;
+                                }
+                            }
+                        }
+                    }
+                    if dmc.bit_indx < 8 {
+                        if dmc.load_data.bit(dmc.bit_indx as usize) {
+                            if dmc.dac_value <= 125 {
+                                dmc.dac_value += 2;
+                            }
+                        } else {
+                            dmc.dac_value = dmc.dac_value.saturating_sub(2);
+                        }
+                        dmc.bit_indx += 1;
+                        ampl = dmc.dac_value as i32;
+                    }
+                    blip.fill(blip.tick + period, ampl);
+                }
+            });
+        }
+
         /*  mode 0:    mode 1:       function
             ---------  -----------  -----------------------------
             - - - f    - - - - -    IRQ (if bit 6 is clear)
@@ -2211,7 +2273,7 @@ pub mod apu {
             e e e e    e e e - e    Envelope and linear counter
         */
         #[inline]
-        fn frame_counter_trig_mode0(&mut self) {
+        fn frame_counter_trig_mode0(&mut self, mem: &mut MemMap) {
             let cpu_now_cycles = get_cpu_cycles();
 
             if (self.frame_counter & 0x1) == 0x1 {
@@ -2232,11 +2294,12 @@ pub mod apu {
             self.trig_pulse_timer(1, cpu_now_cycles);
             self.trig_triangle_timer(cpu_now_cycles);
             self.trig_noise_timer(cpu_now_cycles);
+            self.trig_dmc_timer(cpu_now_cycles, mem);
 
             self.frame_counter = (self.frame_counter + 1) & 0x3;
         }
         #[inline]
-        fn frame_counter_trig_mode1(&mut self) {
+        fn frame_counter_trig_mode1(&mut self, mem: &mut MemMap) {
             let cpu_now_cycles = get_cpu_cycles();
 
             if self.frame_counter == 0x1 || self.frame_counter == 0x4 {
@@ -2256,13 +2319,14 @@ pub mod apu {
             self.trig_pulse_timer(1, cpu_now_cycles);
             self.trig_triangle_timer(cpu_now_cycles);
             self.trig_noise_timer(cpu_now_cycles);
+            self.trig_dmc_timer(cpu_now_cycles, mem);
 
             self.frame_counter += 1;
             if self.frame_counter > 4 {
                 self.frame_counter = 0;
             }
         }
-        pub fn frame_counter_trig(&mut self) {
+        pub fn frame_counter_trig(&mut self, mem: &mut MemMap) {
             /*  mode 0:    mode 1:       function
                 ---------  -----------  -----------------------------
                 - - - f    - - - - -    IRQ (if bit 6 is clear)
@@ -2270,9 +2334,9 @@ pub mod apu {
                 e e e e    e e e - e    Envelope and linear counter
             */
             if self.reg.frame_counter_ctrl.mode() {
-                self.frame_counter_trig_mode1();
+                self.frame_counter_trig_mode1(mem);
             } else {
-                self.frame_counter_trig_mode0();
+                self.frame_counter_trig_mode0(mem);
             }
         }
     }

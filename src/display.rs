@@ -25,6 +25,9 @@ pub mod disp {
         vblank_length: 20,
     };
 
+    pub const TV_SYSTEM_NTSC: u8 = 0;
+    pub const TV_SYSTEM_PAL: u8 = 1;
+
     pub trait DisplayFunc<T, M> {
         fn generate_palette_data(&mut self, palette_indx_tbl: &[u8]);
         fn draw_bg_scanline(&mut self, x: u16, y: u16);

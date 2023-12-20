@@ -17,16 +17,18 @@ use std::env;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crate::cpu2a03::cycle::cpu_cycles_reset;
 use crate::display::disp::{self, DisplayFunc};
 use crate::display::display_sdl2::disp_sdl2;
 use crate::input::input::InputFunc;
 use crate::input::input_sdl2::input_sdl2;
 use common::error;
 use cpu2a03::cpu;
+use cpu2a03::memory;
 use ppu2c02::ppu;
 use rom_fs::rom;
 
-fn reset(cpu_reg: &mut cpu::Register, mem: &mut cpu::MemMap) {
+fn reset(cpu_reg: &mut cpu::Register, mem: &mut memory::MemMap) {
     cpu_reg.reset(mem);
 }
 
@@ -37,7 +39,25 @@ fn main() -> Result<(), error::CustomError> {
 
     let (head, prgrom_buf, pattern_buff1k) = rom::load_rom(file_name)?;
     // println!("head:{:#?}",head);
-    let mut mem = cpu::MemMap::new();
+
+    /*------------------------------display init------------------------------------------*/
+    let mut disp = disp_sdl2::DispSDL2::new();
+    assert_eq!(
+        head.timing,
+        disp::TV_SYSTEM_NTSC,
+        "Just support NTSC system!!!"
+    );
+    let dis_std = disp::NTSC;
+    let tv_system = disp::TV_SYSTEM_NTSC;
+    /*------------------------------------------------------------------------------------*/
+
+    /*------------------------------input init--------------------------------------------*/
+    let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
+    /*------------------------------------------------------------------------------------*/
+
+    /*------------------------------cpu memory init--------------------------------------------*/
+    let mut mem = memory::MemMap::new(dis_std.cpu_clock_hz, dis_std.cpu_clock_hz, tv_system);
+
     let mut offset = 0;
     if head.prgrom_size_16k > 1 {
         offset = 0x4000;
@@ -48,23 +68,16 @@ fn main() -> Result<(), error::CustomError> {
         &prgrom_buf[offset + 0x00..offset + 0x2000],
         &prgrom_buf[offset + 0x2000..offset + 0x4000],
     ];
-
     for i in 0..8 {
         mem.ppu_mem.bank[i] = pattern_buff1k[i].clone();
     }
-
     mem.ppu_mem
         .mapping_name_table(head.flag6.four_screen(), head.flag6.mirror_flag());
+    /*------------------------------------------------------------------------------------*/
 
+    /*------------------------------cpu Register init--------------------------------------------*/
     let mut cpu_reg = cpu::Register::new();
     reset(&mut cpu_reg, &mut mem);
-
-    /*------------------------------display init------------------------------------------*/
-    let mut disp = disp_sdl2::DispSDL2::new();
-    let dis_std = disp::NTSC;
-    /*------------------------------------------------------------------------------------*/
-    /*------------------------------input init--------------------------------------------*/
-    let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
     /*------------------------------------------------------------------------------------*/
 
     let mut cpu_cycles_end;
@@ -74,7 +87,7 @@ fn main() -> Result<(), error::CustomError> {
     'running: loop {
         let start = Instant::now();
         master_cycles = 0;
-        cpu::cpu_cycles_reset();
+        cpu_cycles_reset();
         let (mut sprite0_x, mut sprite0_y) = (0xff, 0xff);
         let mut sprite0_should_hit;
 
