@@ -22,6 +22,7 @@ pub mod cycle {
 
 pub mod memory {
     use crate::cpu2a03::apu;
+    use crate::cpu2a03::cpu::irq_ack;
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::ppu2c02::ppu;
 
@@ -34,6 +35,11 @@ pub mod memory {
         pub key: [[u8; 8]; 2],
         pub key_indx: [usize; 2],
         pub ppu_mem: ppu::MemMap,
+        //add for emulator
+        pub irq_inhibit: bool,
+        pub irq_counter: u8,
+        pub irq_flag: u8,
+        pub irq_in_process: u8,
     }
 
     impl MemMap<'_> {
@@ -47,6 +53,10 @@ pub mod memory {
                 sram: [0; 0x2000],
                 prg_rom: Default::default(),
                 ppu_mem: ppu::MemMap::new(),
+                irq_inhibit: false,
+                irq_counter: 0,
+                irq_flag: 0,
+                irq_in_process: 0,
             }
         }
         pub fn read_memeory(&mut self, addr: u16) -> u8 {
@@ -79,6 +89,7 @@ pub mod memory {
                             }
                             val
                         } else if addr == 0x4015 {
+                            irq_ack(self);
                             self.apu_mem.get_wave_reg(addr)
                         } else {
                             0
@@ -190,6 +201,7 @@ pub mod cpu {
     pub const NMI_VECT_ADDR: u16 = 0xFFFA;
     pub const REST_VECT_ADDR: u16 = 0xFFFC;
     pub const BRK_VECT_ADDR: u16 = 0xFFFE;
+    pub const IRQ_VECT_ADDR: u16 = 0xFFFE;
 
     pub const KEY_A: usize = 0;
     pub const KEY_B: usize = 1;
@@ -289,11 +301,6 @@ pub mod cpu {
         pub a: u8,              //Accumulator
         pub x: u8,              //Index register X
         pub y: u8,              //Index register Y
-        //add for emulator
-        pub irq_counter: u8,
-        pub irq_flag: u8,
-        pub irq_in_process: u8,
-        pub nmi_in_process: u8,
     }
 
     impl Register {
@@ -305,10 +312,6 @@ pub mod cpu {
                 a: 0,
                 x: 0,
                 y: 0,
-                irq_counter: 0,
-                irq_flag: 0,
-                irq_in_process: 0,
-                nmi_in_process: 0,
             }
         }
 
@@ -323,10 +326,6 @@ pub mod cpu {
                 a: 0,
                 x: 0,
                 y: 0,
-                irq_counter: 0,
-                irq_flag: 0,
-                irq_in_process: 0,
-                nmi_in_process: 0,
             };
         }
     }
@@ -340,10 +339,40 @@ pub mod cpu {
             (cpu_reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
         );
         cpu_reg.p.set_i(true);
+        mem.irq_inhibit = true;
         val_pc = mem.read_memeory(NMI_VECT_ADDR) as u16;
         val_pc |= (mem.read_memeory(NMI_VECT_ADDR + 1) as u16) << 8;
         cpu_reg.pc = val_pc;
         cpu_cycles_add(7);
+    }
+
+    fn irq_handler(cpu_reg: &mut Register, mem: &mut MemMap) {
+        let mut val_pc = cpu_reg.pc;
+        mem.push(&mut cpu_reg.sp, (val_pc >> 8) as u8);
+        mem.push(&mut cpu_reg.sp, (val_pc & 0xff) as u8);
+        mem.push(
+            &mut cpu_reg.sp,
+            (cpu_reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
+        );
+        cpu_reg.p.set_i(true);
+        mem.irq_inhibit = true;
+        val_pc = mem.read_memeory(IRQ_VECT_ADDR) as u16;
+        val_pc |= (mem.read_memeory(IRQ_VECT_ADDR + 1) as u16) << 8;
+        cpu_reg.pc = val_pc;
+        cpu_cycles_add(7);
+    }
+
+    pub fn irq_req(mem: &mut MemMap) {
+        if mem.irq_inhibit {
+            mem.irq_flag = 1;
+        } else {
+            mem.irq_counter = 1;
+        }
+    }
+
+    pub fn irq_ack(mem: &mut MemMap) {
+        mem.irq_flag = 0;
+        mem.irq_counter = 0;
     }
 
     pub fn vblank(cpu_reg: &mut Register, mem: &mut MemMap) {
@@ -753,10 +782,13 @@ pub mod cpu {
                 Instruction::CLI => {
                     // CLI--清除中断禁止 V         0 -> I
                     cpu_reg.p.set_i(false);
+                    mem.irq_inhibit = false;
+                    mem.irq_counter = mem.irq_flag << 1;
                 }
                 Instruction::SEI => {
                     // SEI--设置中断禁止 V         1 -> I
                     cpu_reg.p.set_i(true);
+                    mem.irq_inhibit = true;
                 }
                 Instruction::CMP => {
                     // CMP--累加器和存储器比较
@@ -882,6 +914,9 @@ pub mod cpu {
                     cpu_reg.p.0 = mem.pop(&mut cpu_reg.sp);
                     cpu_reg.p.set_b(false);
                     cpu_reg.p.set_r(true);
+                    if cpu_reg.p.i() == false {
+                        mem.irq_counter = mem.irq_flag << 1;
+                    }
                 }
                 Instruction::JMP => {
                     // JMP--无条件跳转
@@ -961,6 +996,7 @@ pub mod cpu {
                             | ProcessorStatusFlags::FLAG_R.bits(),
                     );
                     cpu_reg.p.set_i(true);
+                    mem.irq_inhibit = true;
                     let pcl: u16 = mem.read_memeory(BRK_VECT_ADDR) as u16;
                     let pch: u16 = mem.read_memeory(BRK_VECT_ADDR + 1) as u16;
                     cpu_reg.pc = pcl | (pch << 8);
@@ -977,9 +1013,8 @@ pub mod cpu {
                     let pch: u16 = mem.pop(&mut cpu_reg.sp) as u16;
                     cpu_reg.pc = pcl | (pch << 8);
                     // 清除计数
-                    cpu_reg.irq_counter =
-                        cpu_reg.irq_in_process & cpu_reg.irq_flag & ((!cpu_reg.p.i()) as u8);
-                    cpu_reg.irq_in_process = 0;
+                    mem.irq_counter = mem.irq_in_process & mem.irq_flag & ((!cpu_reg.p.i()) as u8);
+                    mem.irq_in_process = 0;
                 }
                 //---  组合指令  ----------
                 Instruction::ASR | Instruction::ALR => {
@@ -1422,6 +1457,14 @@ pub mod cpu {
     pub fn execute_one_instruction(cpu_reg: &mut Register, mem: &mut MemMap) {
         let machine_code: u8;
 
+        if mem.irq_counter != 0 {
+            mem.irq_counter -= 1;
+            if mem.irq_counter == 0 {
+                mem.irq_in_process = 1;
+                irq_handler(cpu_reg, mem);
+                return;
+            }
+        }
         machine_code = mem.read_memeory(cpu_reg.pc);
         // print!(
         //     "code addr {:#x}, machine_code {:#x}, ",
@@ -1480,6 +1523,8 @@ pub mod apu {
 
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::cpu2a03::memory::MemMap;
+
+    use super::cpu::irq_req;
 
     /* DDLC VVVV
      Duty (D),
@@ -1916,8 +1961,22 @@ pub mod apu {
     }
     fn set_frame_counter_23(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.frame_counter_ctrl.0 = val;
-        if apu_dev.reg.frame_counter_ctrl.irq_inhibit_flag(){
+        if apu_dev.reg.frame_counter_ctrl.irq_inhibit_flag() {
             apu_dev.frame_int_flag = false;
+        }
+        // 5 步模式会立刻产生一个 1/2 和 1/4 时钟信号
+        if apu_dev.reg.frame_counter_ctrl.mode() {
+            // Length counter and sweep
+            apu_dev.trig_pulse_length(0);
+            apu_dev.trig_pulse_length(1);
+            apu_dev.trig_pulse_sweep(0);
+            apu_dev.trig_pulse_sweep(1);
+            apu_dev.trig_triangle_length();
+            apu_dev.trig_noise_length();
+            // Envelope and linear counter
+            apu_dev.trig_pulse_envelope(0);
+            apu_dev.trig_pulse_envelope(1);
+            apu_dev.trig_triangle_line();
         }
     }
 
@@ -2285,6 +2344,10 @@ pub mod apu {
                 self.trig_noise_length();
             } else if self.frame_counter == 3 {
                 //IRQ
+                if self.reg.frame_counter_ctrl.irq_inhibit_flag() == false {
+                    self.frame_int_flag = true;
+                    irq_req(mem);
+                }
             }
             self.trig_pulse_envelope(0);
             self.trig_pulse_envelope(1);
