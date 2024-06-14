@@ -10,24 +10,27 @@ mod display;
 mod input;
 mod ppu2c02;
 mod rom_fs;
+mod sound;
 
 use ahash::AHashMap;
-use std::cell::RefCell;
-use std::env;
-use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::{
+    cell::RefCell,
+    env,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
-use crate::cpu2a03::cycle::cpu_cycles_reset;
-use crate::display::disp::{self, DisplayFunc};
-use crate::display::display_sdl2::disp_sdl2;
-use crate::input::input::InputFunc;
-use crate::input::input_sdl2::input_sdl2;
 use common::error;
-use cpu2a03::cpu;
-use cpu2a03::memory;
+use cpu2a03::{cpu, memory, apu, cycle::cpu_cycles_reset};
+use display::disp::{self, DisplayFunc};
+use display::display_sdl2::disp_sdl2;
+use input::input::InputFunc;
+use input::input_sdl2::input_sdl2;
 use ppu2c02::ppu;
 use rom_fs::rom;
+use sound::sound_base::snd_base;
 
+#[inline(always)]
 fn reset(cpu_reg: &mut cpu::Register, mem: &mut memory::MemMap) {
     cpu_reg.reset(mem);
 }
@@ -53,6 +56,10 @@ fn main() -> Result<(), error::CustomError> {
 
     /*------------------------------input init--------------------------------------------*/
     let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
+    /*------------------------------------------------------------------------------------*/
+
+    /*------------------------------sound init--------------------------------------------*/
+    // let sound = ;
     /*------------------------------------------------------------------------------------*/
 
     /*------------------------------cpu memory init--------------------------------------------*/
@@ -137,6 +144,7 @@ fn main() -> Result<(), error::CustomError> {
             /* all 262 line trigger 4 times, so trigger per 65 line. */
             if j == 65 || j == 130 || j == 195 {
                 // APU frame counter trigger
+            //    mem.apu_mem.frame_counter_trig(&mut mem);
             }
 
             //dot 256, 257
