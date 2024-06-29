@@ -1,5 +1,12 @@
 #![allow(dead_code)]
 
+trait Bus {
+    fn read(&mut self, addr: u16) -> u8;
+    fn write(&mut self, addr: u16, val: u8);
+    fn push(&mut self, sp_piont: &mut u8, data: u8);
+    fn pop(&self, sp_piont: &mut u8) -> u8;
+}
+
 pub mod cycle {
     static mut CPU_CYCLES: u32 = 0;
 
@@ -26,40 +33,21 @@ pub mod memory {
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::ppu2c02::ppu;
 
+    use super::Bus;
+
     pub struct MemMap<'a> {
         pub ram: [u8; 0x800],
         pub ppu_reg: ppu::Register,
-        pub apu_mem: apu::Apu,
+        pub apu: apu::Apu,
         pub sram: [u8; 0x2000], // save RAM
         pub prg_rom: [&'a [u8]; 4],
         pub key: [[u8; 8]; 2],
         pub key_indx: [usize; 2],
         pub ppu_mem: ppu::MemMap,
-        //add for emulator
-        pub irq_inhibit: bool,
-        pub irq_counter: u8,
-        pub irq_flag: u8,
-        pub irq_in_process: u8,
     }
 
-    impl MemMap<'_> {
-        pub fn new(cpu_clock_hz: u32, apu_sample_rate: u32, tv_system: u8) -> Self {
-            MemMap {
-                ram: [0; 0x800],
-                ppu_reg: ppu::Register::new(),
-                apu_mem: apu::Apu::new(cpu_clock_hz, apu_sample_rate, tv_system),
-                key: [[0; 8]; 2],
-                key_indx: [0; 2],
-                sram: [0; 0x2000],
-                prg_rom: Default::default(),
-                ppu_mem: ppu::MemMap::new(),
-                irq_inhibit: false,
-                irq_counter: 0,
-                irq_flag: 0,
-                irq_in_process: 0,
-            }
-        }
-        pub fn read_memeory(&mut self, addr: u16) -> u8 {
+    impl Bus for MemMap<'_> {
+        fn read(&mut self, addr: u16) -> u8 {
             let i: usize = addr.into();
             let j: usize = i >> 13;
 
@@ -90,7 +78,7 @@ pub mod memory {
                             val
                         } else if addr == 0x4015 {
                             irq_ack(self);
-                            self.apu_mem.get_wave_reg(addr)
+                            self.apu.read(addr)
                         } else {
                             0
                         }
@@ -102,9 +90,39 @@ pub mod memory {
             }
         }
 
-        pub fn write_memeory(&mut self, addr: u16, val: u8) {
+        fn write(&mut self, addr: u16, val: u8) {
             let i: usize = addr.into();
             let j: usize = i >> 13;
+
+            let mut dma_write = |addr_dma: u16| {
+                let offset: usize = (addr_dma & 0x1f00).into();
+                let base = addr_dma >> 13;
+                let src = match base {
+                    0 => {
+                        let mirror = offset & 0x7ff;
+                        &self.ram[mirror..mirror + 256]
+                    }
+                    3 => &self.sram[offset..offset + 256],
+                    4 | 5 | 6 | 7 => &self.prg_rom[base as usize - 4][offset..256],
+                    1 | 2 => {
+                        unimplemented!("Can't be operating by DMA.");
+                    }
+                    _ => unreachable!("Out of memory range!"),
+                };
+                if self.ppu_reg.oam_addr == 0 {
+                    self.ppu_mem.oam.clone_from_slice(src);
+                } else {
+                    let off = (255 - self.ppu_reg.oam_addr + 1) as usize;
+                    self.ppu_mem.oam[self.ppu_reg.oam_addr as usize..=255]
+                        .clone_from_slice(&src[..off]);
+                    self.ppu_mem.oam[..self.ppu_reg.oam_addr as usize].clone_from_slice(&src[off..]);
+                }
+                cpu_cycles_add(513);
+                if get_cpu_cycles() & 0x1 == 0x1 {
+                    cpu_cycles_add(1);
+                }
+            };
+
             match j {
                 0 => {
                     self.ram[i & 0x7ff] = val;
@@ -115,14 +133,14 @@ pub mod memory {
                 2 => {
                     if addr == 0x4014 {
                         //DMA write
-                        dma_write(self, (val as u16) << 8);
+                        dma_write((val as u16) << 8);
                     } else if addr == 0x4016 {
                         if val & 0x1 == 0 {
                             self.key_indx[0] = 0;
                             self.key_indx[1] = 0;
                         }
                     } else if addr < 0x4020 {
-                        self.apu_mem.set_wave_reg[(addr & 0x1f) as usize](&mut self.apu_mem, val);
+                        self.apu.write(addr, val);
                     }
                 }
                 3 => {
@@ -133,45 +151,31 @@ pub mod memory {
                 }
                 _ => unreachable!("Out of memory range!"),
             }
-
-            fn dma_write(mem: &mut MemMap, addr_dma: u16) {
-                let offset: usize = (addr_dma & 0x1f00).into();
-                let base = addr_dma >> 13;
-                let src = match base {
-                    0 => {
-                        let mirror = offset & 0x7ff;
-                        &mem.ram[mirror..mirror + 256]
-                    }
-                    3 => &mem.sram[offset..offset + 256],
-                    4 | 5 | 6 | 7 => &mem.prg_rom[base as usize - 4][offset..256],
-                    1 | 2 => {
-                        unimplemented!("Can't be operating by DMA.");
-                    }
-                    _ => unreachable!("Out of memory range!"),
-                };
-                if mem.ppu_reg.oam_addr == 0 {
-                    mem.ppu_mem.oam.clone_from_slice(src);
-                } else {
-                    let off = (255 - mem.ppu_reg.oam_addr + 1) as usize;
-                    mem.ppu_mem.oam[mem.ppu_reg.oam_addr as usize..=255]
-                        .clone_from_slice(&src[..off]);
-                    mem.ppu_mem.oam[..mem.ppu_reg.oam_addr as usize].clone_from_slice(&src[off..]);
-                }
-                cpu_cycles_add(513);
-                if get_cpu_cycles() & 0x1 == 0x1 {
-                    cpu_cycles_add(1);
-                }
-            }
         }
 
-        pub fn push(&mut self, sp_piont: &mut u8, data: u8) {
+        fn push(&mut self, sp_piont: &mut u8, data: u8) {
             self.ram[0x100 + *sp_piont as usize] = data;
             *sp_piont = (*sp_piont).wrapping_sub(1);
         }
 
-        pub fn pop(&self, sp_piont: &mut u8) -> u8 {
+        fn pop(&self, sp_piont: &mut u8) -> u8 {
             *sp_piont = (*sp_piont).wrapping_add(1);
             self.ram[0x100 + *sp_piont as usize]
+        }
+    }
+
+    impl MemMap<'_> {
+        pub fn new(cpu_clock_hz: u32, apu_sample_rate: u32, tv_system: u8) -> Self {
+            MemMap {
+                ram: [0; 0x800],
+                ppu_reg: ppu::Register::new(),
+                apu: apu::Apu::new(cpu_clock_hz, apu_sample_rate, tv_system),
+                key: [[0; 8]; 2],
+                key_indx: [0; 2],
+                sram: [0; 0x2000],
+                prg_rom: Default::default(),
+                ppu_mem: ppu::MemMap::new(),
+            }
         }
     }
 }
@@ -179,6 +183,11 @@ pub mod memory {
 pub mod cpu {
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::cpu2a03::memory::MemMap;
+    use super::Bus;
+    use bitfield;
+    use bitflags::bitflags;
+    use std::fmt;
+
 
     /*
     address         size 	  describe
@@ -211,10 +220,6 @@ pub mod cpu {
     pub const KEY_DOWN: usize = 5;
     pub const KEY_LEFT: usize = 6;
     pub const KEY_RIGHT: usize = 7;
-
-    use bitfield;
-    use bitflags::bitflags;
-    use std::fmt;
 
     bitfield! {
         pub struct ProcessorStatus(u8);
@@ -312,12 +317,12 @@ pub mod cpu {
                 a: 0,
                 x: 0,
                 y: 0,
-            }
+           }
         }
 
         pub fn reset(&mut self, mem: &mut MemMap) {
-            let pcl = mem.read_memeory(REST_VECT_ADDR);
-            let pch = mem.read_memeory(REST_VECT_ADDR + 1);
+            let pcl = mem.read(REST_VECT_ADDR);
+            let pch = mem.read(REST_VECT_ADDR + 1);
 
             *self = Register {
                 pc: (pch as u16) << 8 | (pcl as u16),
@@ -330,55 +335,84 @@ pub mod cpu {
         }
     }
 
-    fn nmi_handler(cpu_reg: &mut Register, mem: &mut MemMap) {
-        let mut val_pc = cpu_reg.pc;
-        mem.push(&mut cpu_reg.sp, (val_pc >> 8) as u8);
-        mem.push(&mut cpu_reg.sp, (val_pc & 0xff) as u8);
-        mem.push(
-            &mut cpu_reg.sp,
-            (cpu_reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
-        );
-        cpu_reg.p.set_i(true);
-        mem.irq_inhibit = true;
-        val_pc = mem.read_memeory(NMI_VECT_ADDR) as u16;
-        val_pc |= (mem.read_memeory(NMI_VECT_ADDR + 1) as u16) << 8;
-        cpu_reg.pc = val_pc;
-        cpu_cycles_add(7);
+    struct Core{
+        pub reg:Register,
+        mem_bus: Box<dyn Bus>,
+        pub irq_inhibit: bool,
+        pub irq_counter: u8,
+        pub irq_flag: u8,
+        pub irq_in_process: u8,
     }
 
-    fn irq_handler(cpu_reg: &mut Register, mem: &mut MemMap) {
-        let mut val_pc = cpu_reg.pc;
-        mem.push(&mut cpu_reg.sp, (val_pc >> 8) as u8);
-        mem.push(&mut cpu_reg.sp, (val_pc & 0xff) as u8);
-        mem.push(
-            &mut cpu_reg.sp,
-            (cpu_reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
-        );
-        cpu_reg.p.set_i(true);
-        mem.irq_inhibit = true;
-        val_pc = mem.read_memeory(IRQ_VECT_ADDR) as u16;
-        val_pc |= (mem.read_memeory(IRQ_VECT_ADDR + 1) as u16) << 8;
-        cpu_reg.pc = val_pc;
-        cpu_cycles_add(7);
-    }
-
-    pub fn irq_req(mem: &mut MemMap) {
-        if mem.irq_inhibit {
-            mem.irq_flag = 1;
-        } else {
-            mem.irq_counter = 1;
+    impl Core {
+        pub fn new(mem_bus: Box<dyn Bus>) -> Self {
+            Self{
+            reg : Register::new(),
+            mem_bus,
+            irq_inhibit: false,
+            irq_counter: 0,
+            irq_flag: 0,
+            irq_in_process: 0,
+            }
         }
-    }
+        pub fn reset(&mut self, mem: &mut MemMap) {
+                self.reg.reset(mem);
+                self.irq_inhibit = false;
+                self.irq_counter= 0;
+                self.irq_flag= 0;
+                self.irq_in_process= 0; 
+        }
 
-    pub fn irq_ack(mem: &mut MemMap) {
-        mem.irq_flag = 0;
-        mem.irq_counter = 0;
-    }
-
-    pub fn vblank(cpu_reg: &mut Register, mem: &mut MemMap) {
-        mem.ppu_reg.status.set_v(true);
-        if mem.ppu_reg.ctrl.v() {
-            nmi_handler(cpu_reg, mem);
+        pub fn nmi_handler(&mut self, mem: &mut MemMap) {
+            let mut val_pc = self.reg.pc;
+            mem.push(&mut self.reg.sp, (val_pc >> 8) as u8);
+            mem.push(&mut self.reg.sp, (val_pc & 0xff) as u8);
+            mem.push(
+                &mut self.reg.sp,
+                (self.reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
+            );
+            self.reg.p.set_i(true);
+            self.irq_inhibit = true;
+            val_pc = mem.read(NMI_VECT_ADDR) as u16;
+            val_pc |= (mem.read(NMI_VECT_ADDR + 1) as u16) << 8;
+            self.reg.pc = val_pc;
+            cpu_cycles_add(7);
+        }
+    
+        pub fn irq_handler(&mut self, mem: &mut MemMap) {
+            let mut val_pc = self.reg.pc;
+            mem.push(&mut self.reg.sp, (val_pc >> 8) as u8);
+            mem.push(&mut self.reg.sp, (val_pc & 0xff) as u8);
+            mem.push(
+                &mut self.reg.sp,
+                (self.reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
+            );
+            self.reg.p.set_i(true);
+            self.irq_inhibit = true;
+            val_pc = mem.read(IRQ_VECT_ADDR) as u16;
+            val_pc |= (mem.read(IRQ_VECT_ADDR + 1) as u16) << 8;
+            self.reg.pc = val_pc;
+            cpu_cycles_add(7);
+        }
+    
+        pub fn irq_req(&mut self) {
+            if self.irq_inhibit {
+                self.irq_flag = 1;
+            } else {
+                self.irq_counter = 1;
+            }
+        }
+    
+        pub fn irq_ack(&mut self) {
+            self.irq_flag = 0;
+            self.irq_counter = 0;
+        }
+    
+        pub fn vblank(&mut self, mem: &mut MemMap) {
+            mem.ppu_reg.status.set_v(true);
+            if mem.ppu_reg.ctrl.v() {
+                self.nmi_handler(mem);
+            }
         }
     }
 
@@ -404,7 +438,8 @@ pub mod cpu {
     }
 
     impl AddressingMode {
-        pub fn addressing(&self, cpu_reg: &mut Register, mem: &mut MemMap) -> u16 {
+        pub fn addressing(&self, core:&mut Core, mem: &mut MemMap) -> u16 {
+            let cpu_reg: &mut Register = &mut core.reg;
             match self {
                 AddressingMode::Acc => 0,
                 AddressingMode::Imp => 0,
@@ -414,92 +449,92 @@ pub mod cpu {
                     addr
                 }
                 AddressingMode::Abs => {
-                    let mut addr: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let mut addr: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    addr |= (mem.read_memeory(cpu_reg.pc) as u16) << 8;
+                    addr |= (mem.read(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     addr
                 }
                 AddressingMode::ZpAbs => {
-                    let addr: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let addr: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     addr
                 }
                 AddressingMode::AbsXI => {
-                    let mut addr: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let mut addr: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    addr |= (mem.read_memeory(cpu_reg.pc) as u16) << 8;
+                    addr |= (mem.read(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     addr.wrapping_add(cpu_reg.x as u16)
                 }
                 AddressingMode::AbsXI1C => {
-                    let mut addr: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let mut addr: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    addr |= (mem.read_memeory(cpu_reg.pc) as u16) << 8;
+                    addr |= (mem.read(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     let val = addr.wrapping_add(cpu_reg.x as u16);
                     cpu_cycles_add((((addr ^ val) >> 8) & 1) as u32);
                     val
                 }
                 AddressingMode::AbsYI => {
-                    let mut addr: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let mut addr: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    addr |= (mem.read_memeory(cpu_reg.pc) as u16) << 8;
+                    addr |= (mem.read(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     addr.wrapping_add(cpu_reg.y as u16)
                 }
                 AddressingMode::AbsYI1C => {
-                    let mut addr: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let mut addr: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    addr |= (mem.read_memeory(cpu_reg.pc) as u16) << 8;
+                    addr |= (mem.read(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     let val = addr.wrapping_add(cpu_reg.y as u16);
                     cpu_cycles_add(((addr ^ val) >> 8) as u32 & 1);
                     val
                 }
                 AddressingMode::ZpXI => {
-                    let addr: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let addr: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     (addr.wrapping_add(cpu_reg.x as u16)) & 0x00ff
                 }
                 AddressingMode::ZpYI => {
-                    let addr: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let addr: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     (addr.wrapping_add(cpu_reg.y as u16)) & 0x00ff
                 }
                 AddressingMode::Ind => {
-                    let mut addr1: u16 = mem.read_memeory(cpu_reg.pc) as u16;
+                    let mut addr1: u16 = mem.read(cpu_reg.pc) as u16;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    addr1 |= (mem.read_memeory(cpu_reg.pc) as u16) << 8;
+                    addr1 |= (mem.read(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     let addr2: u16 = (addr1 & 0xff00) | ((addr1.wrapping_add(1)) & 0x00ff); // 刻意实现 6502 的 BUG
-                    (mem.read_memeory(addr1) as u16) | ((mem.read_memeory(addr2) as u16) << 8)
+                    (mem.read(addr1) as u16) | ((mem.read(addr2) as u16) << 8)
                 }
                 AddressingMode::IndX => {
-                    let mut addr = mem.read_memeory(cpu_reg.pc);
+                    let mut addr = mem.read(cpu_reg.pc);
                     addr = addr.wrapping_add(cpu_reg.x);
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    (mem.read_memeory(addr as u16) as u16)
-                        | ((mem.read_memeory(addr.wrapping_add(1) as u16) as u16) << 8)
+                    (mem.read(addr as u16) as u16)
+                        | ((mem.read(addr.wrapping_add(1) as u16) as u16) << 8)
                 }
                 AddressingMode::IndY => {
-                    let addr = mem.read_memeory(cpu_reg.pc);
+                    let addr = mem.read(cpu_reg.pc);
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    let val = (mem.read_memeory(addr as u16) as u16)
-                        | ((mem.read_memeory(addr.wrapping_add(1) as u16) as u16) << 8);
+                    let val = (mem.read(addr as u16) as u16)
+                        | ((mem.read(addr.wrapping_add(1) as u16) as u16) << 8);
                     val.wrapping_add(cpu_reg.y as u16)
                 }
                 AddressingMode::IndY1C => {
-                    let addr = mem.read_memeory(cpu_reg.pc);
+                    let addr = mem.read(cpu_reg.pc);
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-                    let mut val = (mem.read_memeory(addr as u16) as u16)
-                        | ((mem.read_memeory(addr.wrapping_add(1) as u16) as u16) << 8);
+                    let mut val = (mem.read(addr as u16) as u16)
+                        | ((mem.read(addr.wrapping_add(1) as u16) as u16) << 8);
                     val = val.wrapping_add(cpu_reg.y as u16);
                     cpu_cycles_add((((addr as u16 ^ val) >> 8) & 1) as u32);
                     val
                 }
                 AddressingMode::Rel => {
-                    let addr = mem.read_memeory(cpu_reg.pc) as i8;
+                    let addr = mem.read(cpu_reg.pc) as i8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     cpu_reg.pc.saturating_add_signed(addr as i16)
                 }
@@ -600,37 +635,38 @@ pub mod cpu {
     }
 
     impl Instruction {
-        pub fn exec(&self, cpu_reg: &mut Register, mem: &mut MemMap, addr: u16) {
+        pub fn exec(&self, core: &mut Core, mem: &mut MemMap, addr: u16) {
+            let cpu_reg: &mut Register = &mut core.reg;
             match self {
                 Instruction::LDA => {
                     // LDA--由存储器取数送入累加器 A    M -> A
-                    cpu_reg.a = mem.read_memeory(addr);
+                    cpu_reg.a = mem.read(addr);
                     cpu_reg.p.check_set_n(cpu_reg.a);
                     cpu_reg.p.check_set_z(cpu_reg.a);
                 }
                 Instruction::LDX => {
                     // LDX--由存储器取数送入寄存器 X    M -> X
-                    cpu_reg.x = mem.read_memeory(addr);
+                    cpu_reg.x = mem.read(addr);
                     cpu_reg.p.check_set_n(cpu_reg.x);
                     cpu_reg.p.check_set_z(cpu_reg.x);
                 }
                 Instruction::LDY => {
                     // LDY--由存储器取数送入寄存器 Y    M -> Y
-                    cpu_reg.y = mem.read_memeory(addr);
+                    cpu_reg.y = mem.read(addr);
                     cpu_reg.p.check_set_n(cpu_reg.y);
                     cpu_reg.p.check_set_z(cpu_reg.y);
                 }
                 Instruction::STA => {
                     // STA--将累加器 A 的数送入存储器    A -> M
-                    mem.write_memeory(addr, cpu_reg.a);
+                    mem.write(addr, cpu_reg.a);
                 }
                 Instruction::STX => {
                     // STX--将寄存器 X 的数送入存储器    X -> M
-                    mem.write_memeory(addr, cpu_reg.x);
+                    mem.write(addr, cpu_reg.x);
                 }
                 Instruction::STY => {
                     // STY--将寄存器 Y 的数送入存储器    Y -> M
-                    mem.write_memeory(addr, cpu_reg.y);
+                    mem.write(addr, cpu_reg.y);
                 }
                 Instruction::TAX => {
                     // 将累加器 A 的内容送入变址寄存器 X
@@ -668,7 +704,7 @@ pub mod cpu {
                 }
                 Instruction::ADC => {
                     // ADC--累加器，存储器，进位标志 C 相加，结果送累加器 A  A+M+C -> A
-                    let src = mem.read_memeory(addr);
+                    let src = mem.read(addr);
                     let reslt_u16: u16 = (cpu_reg.a as u16)
                         .wrapping_add(src as u16)
                         .wrapping_add(if cpu_reg.p.c() { 1u16 } else { 0u16 });
@@ -684,7 +720,7 @@ pub mod cpu {
                 }
                 Instruction::SBC => {
                     // SBC--从累加器减去存储器和进位标志 C 取反，结果送累加器 A-M-(1-C) -> A
-                    let src = mem.read_memeory(addr);
+                    let src = mem.read(addr);
                     let reslt_u16: u16 = ((cpu_reg.a as i16)
                         - (src as i16)
                         - if cpu_reg.p.c() { 0i16 } else { 1i16 })
@@ -703,17 +739,17 @@ pub mod cpu {
                 }
                 Instruction::INC => {
                     // INC--存储器单元内容增 1  M+1 -> M
-                    let mut val = mem.read_memeory(addr);
+                    let mut val = mem.read(addr);
                     val = val.wrapping_add(1);
-                    mem.write_memeory(addr, val);
+                    mem.write(addr, val);
                     cpu_reg.p.check_set_n(val);
                     cpu_reg.p.check_set_z(val);
                 }
                 Instruction::DEC => {
                     // DEC--存储器单元内容减 1  M-1 -> M
-                    let mut val = mem.read_memeory(addr);
+                    let mut val = mem.read(addr);
                     val = val.wrapping_sub(1);
-                    mem.write_memeory(addr, val);
+                    mem.write(addr, val);
                     cpu_reg.p.check_set_n(val);
                     cpu_reg.p.check_set_z(val);
                 }
@@ -743,19 +779,19 @@ pub mod cpu {
                 }
                 Instruction::AND => {
                     // AND--存储器与累加器相与，结果送累加器  A&M -> A
-                    cpu_reg.a &= mem.read_memeory(addr);
+                    cpu_reg.a &= mem.read(addr);
                     cpu_reg.p.check_set_n(cpu_reg.a);
                     cpu_reg.p.check_set_z(cpu_reg.a);
                 }
                 Instruction::ORA => {
                     // ORA--存储器与累加器相或，结果送累加器  A|M -> A
-                    cpu_reg.a |= mem.read_memeory(addr);
+                    cpu_reg.a |= mem.read(addr);
                     cpu_reg.p.check_set_n(cpu_reg.a);
                     cpu_reg.p.check_set_z(cpu_reg.a);
                 }
                 Instruction::EOR => {
                     // EOR--存储器与累加器异或，结果送累加器  A≮M -> A
-                    cpu_reg.a ^= mem.read_memeory(addr);
+                    cpu_reg.a ^= mem.read(addr);
                     cpu_reg.p.check_set_n(cpu_reg.a);
                     cpu_reg.p.check_set_z(cpu_reg.a);
                 }
@@ -782,48 +818,48 @@ pub mod cpu {
                 Instruction::CLI => {
                     // CLI--清除中断禁止 V         0 -> I
                     cpu_reg.p.set_i(false);
-                    mem.irq_inhibit = false;
-                    mem.irq_counter = mem.irq_flag << 1;
+                    core.irq_inhibit = false;
+                    core.irq_counter = core.irq_flag << 1;
                 }
                 Instruction::SEI => {
                     // SEI--设置中断禁止 V         1 -> I
                     cpu_reg.p.set_i(true);
-                    mem.irq_inhibit = true;
+                    core.irq_inhibit = true;
                 }
                 Instruction::CMP => {
                     // CMP--累加器和存储器比较
-                    let reslt: u16 = (cpu_reg.a as i16 - mem.read_memeory(addr) as i16) as u16;
+                    let reslt: u16 = (cpu_reg.a as i16 - mem.read(addr) as i16) as u16;
                     cpu_reg.p.set_c(reslt & 0x8000 == 0);
                     cpu_reg.p.check_set_n(reslt as u8);
                     cpu_reg.p.check_set_z(reslt as u8);
                 }
                 Instruction::CPX => {
                     // CPX--寄存器 X 的内容和存储器比较
-                    let reslt: u16 = (cpu_reg.x as i16 - mem.read_memeory(addr) as i16) as u16;
+                    let reslt: u16 = (cpu_reg.x as i16 - mem.read(addr) as i16) as u16;
                     cpu_reg.p.set_c(reslt < 256);
                     cpu_reg.p.check_set_n(reslt as u8);
                     cpu_reg.p.check_set_z(reslt as u8);
                 }
                 Instruction::CPY => {
                     // CPY--寄存器 Y 的内容和存储器比较
-                    let reslt: u16 = (cpu_reg.y as i16 - mem.read_memeory(addr) as i16) as u16;
+                    let reslt: u16 = (cpu_reg.y as i16 - mem.read(addr) as i16) as u16;
                     cpu_reg.p.set_c(reslt < 256);
                     cpu_reg.p.check_set_n(reslt as u8);
                     cpu_reg.p.check_set_z(reslt as u8);
                 }
                 Instruction::BIT => {
                     // BIT--位测试
-                    let val = mem.read_memeory(addr);
+                    let val = mem.read(addr);
                     cpu_reg.p.check_set_v(val & 0x40);
                     cpu_reg.p.check_set_n(val);
                     cpu_reg.p.check_set_z(cpu_reg.a & val);
                 }
                 Instruction::ASL => {
                     // ASL--算术左移 储存器
-                    let mut val = mem.read_memeory(addr);
+                    let mut val = mem.read(addr);
                     cpu_reg.p.check_set_c(val & 0x80);
                     val = val << 1;
-                    mem.write_memeory(addr, val);
+                    mem.write(addr, val);
                     cpu_reg.p.check_set_n(val);
                     cpu_reg.p.check_set_z(val);
                 }
@@ -836,10 +872,10 @@ pub mod cpu {
                 }
                 Instruction::LSR => {
                     // LSR--算术右移 储存器
-                    let mut val = mem.read_memeory(addr);
+                    let mut val = mem.read(addr);
                     cpu_reg.p.check_set_c(val & 0x01);
                     val = val >> 1;
-                    mem.write_memeory(addr, val);
+                    mem.write(addr, val);
                     cpu_reg.p.check_set_n(val);
                     cpu_reg.p.check_set_z(val);
                 }
@@ -852,12 +888,12 @@ pub mod cpu {
                 }
                 Instruction::ROL => {
                     // ROL--循环算术左移 储存器
-                    let mut val_u16: u16 = mem.read_memeory(addr) as u16;
+                    let mut val_u16: u16 = mem.read(addr) as u16;
                     val_u16 <<= 1;
                     val_u16 |= if cpu_reg.p.c() { 1 } else { 0 };
                     cpu_reg.p.check_set_c((val_u16 >> 8) as u8);
                     let val_u8 = val_u16 as u8;
-                    mem.write_memeory(addr, val_u8);
+                    mem.write(addr, val_u8);
                     cpu_reg.p.check_set_n(val_u8);
                     cpu_reg.p.check_set_z(val_u8);
                 }
@@ -873,11 +909,11 @@ pub mod cpu {
                 }
                 Instruction::ROR => {
                     // ROR--循环算术右移 储存器
-                    let mut val_u16: u16 = mem.read_memeory(addr) as u16;
+                    let mut val_u16: u16 = mem.read(addr) as u16;
                     val_u16 |= (if cpu_reg.p.c() { 1 } else { 0 }) << 8;
                     cpu_reg.p.check_set_c((val_u16 & 0x1) as u8);
                     let val_u8 = (val_u16 >> 1) as u8;
-                    mem.write_memeory(addr, val_u8);
+                    mem.write(addr, val_u8);
                     cpu_reg.p.check_set_n(val_u8);
                     cpu_reg.p.check_set_z(val_u8);
                 }
@@ -915,7 +951,7 @@ pub mod cpu {
                     cpu_reg.p.set_b(false);
                     cpu_reg.p.set_r(true);
                     if cpu_reg.p.i() == false {
-                        mem.irq_counter = mem.irq_flag << 1;
+                        core.irq_counter = core.irq_flag << 1;
                     }
                 }
                 Instruction::JMP => {
@@ -996,9 +1032,9 @@ pub mod cpu {
                             | ProcessorStatusFlags::FLAG_R.bits(),
                     );
                     cpu_reg.p.set_i(true);
-                    mem.irq_inhibit = true;
-                    let pcl: u16 = mem.read_memeory(BRK_VECT_ADDR) as u16;
-                    let pch: u16 = mem.read_memeory(BRK_VECT_ADDR + 1) as u16;
+                    core.irq_inhibit = true;
+                    let pcl: u16 = mem.read(BRK_VECT_ADDR) as u16;
+                    let pch: u16 = mem.read(BRK_VECT_ADDR + 1) as u16;
                     cpu_reg.pc = pcl | (pch << 8);
                 }
                 Instruction::RTI => {
@@ -1013,14 +1049,14 @@ pub mod cpu {
                     let pch: u16 = mem.pop(&mut cpu_reg.sp) as u16;
                     cpu_reg.pc = pcl | (pch << 8);
                     // 清除计数
-                    mem.irq_counter = mem.irq_in_process & mem.irq_flag & ((!cpu_reg.p.i()) as u8);
-                    mem.irq_in_process = 0;
+                    core.irq_counter = core.irq_in_process & core.irq_flag & ((!cpu_reg.p.i()) as u8);
+                    core.irq_in_process = 0;
                 }
                 //---  组合指令  ----------
                 Instruction::ASR | Instruction::ALR => {
                     // [Unofficial&Combo] AND+LSR
                     //= SFC_INS_ALR{}
-                    cpu_reg.a &= mem.read_memeory(addr);
+                    cpu_reg.a &= mem.read(addr);
                     cpu_reg.p.check_set_c(cpu_reg.a & 0x1);
                     cpu_reg.a >>= 1;
                     cpu_reg.p.check_set_n(cpu_reg.a);
@@ -1028,14 +1064,14 @@ pub mod cpu {
                 }
                 Instruction::ANC | Instruction::AAC => {
                     // [Unofficial&Combo] AND+N2C?
-                    cpu_reg.a &= mem.read_memeory(addr);
+                    cpu_reg.a &= mem.read(addr);
                     cpu_reg.p.check_set_n(cpu_reg.a);
                     cpu_reg.p.check_set_z(cpu_reg.a);
                     cpu_reg.p.set_c(cpu_reg.p.n());
                 }
                 Instruction::ARR => {
                     // [Unofficial&Combo] AND+ROR [类似]
-                    cpu_reg.a &= mem.read_memeory(addr);
+                    cpu_reg.a &= mem.read(addr);
                     cpu_reg.a = (cpu_reg.a >> 1) | if cpu_reg.p.c() { 1 << 7 } else { 0 };
                     cpu_reg.p.check_set_n(cpu_reg.a);
                     cpu_reg.p.check_set_z(cpu_reg.a);
@@ -1046,7 +1082,7 @@ pub mod cpu {
                 }
                 Instruction::AXS | Instruction::SBX => {
                     // [Unofficial&Combo] AND+XSB?
-                    let val = (cpu_reg.a & cpu_reg.x) as i16 - mem.read_memeory(addr) as i16;
+                    let val = (cpu_reg.a & cpu_reg.x) as i16 - mem.read(addr) as i16;
                     cpu_reg.x = (val & 0xff) as u8;
                     cpu_reg.p.check_set_n(cpu_reg.x);
                     cpu_reg.p.check_set_z(cpu_reg.x);
@@ -1054,21 +1090,21 @@ pub mod cpu {
                 }
                 Instruction::LAX => {
                     // [Unofficial&Combo] LDA+TAX
-                    cpu_reg.a = mem.read_memeory(addr);
+                    cpu_reg.a = mem.read(addr);
                     cpu_reg.x = cpu_reg.a;
                     cpu_reg.p.check_set_n(cpu_reg.x);
                     cpu_reg.p.check_set_z(cpu_reg.x);
                 }
                 Instruction::SAX => {
                     // [Unofficial&Combo] STA&STX [类似]
-                    mem.write_memeory(addr, cpu_reg.a & cpu_reg.x);
+                    mem.write(addr, cpu_reg.a & cpu_reg.x);
                 }
                 //--- 读改写指令 ----------
                 Instruction::DCP => {
                     // [Unofficial& RMW ] DEC+CMP
-                    let mut val = mem.read_memeory(addr);
+                    let mut val = mem.read(addr);
                     val = val.wrapping_sub(1);
-                    mem.write_memeory(addr, val);
+                    mem.write(addr, val);
 
                     let val_i16 = cpu_reg.a as i16 - val as i16;
                     cpu_reg.p.set_c(val_i16 >= 0);
@@ -1078,9 +1114,9 @@ pub mod cpu {
                 Instruction::ISC | Instruction::ISB => {
                     // [Unofficial& RMW ] INC+SBC
                     //INC
-                    let mut val = mem.read_memeory(addr);
+                    let mut val = mem.read(addr);
                     val = val.wrapping_add(1);
-                    mem.write_memeory(addr, val);
+                    mem.write(addr, val);
                     //SBC
                     let src = val;
                     let reslt_u16: u16 = ((cpu_reg.a as i16)
@@ -1102,14 +1138,14 @@ pub mod cpu {
                 Instruction::RLA => {
                     // [Unofficial& RMW ] ROL+AND
                     // ROL
-                    let mut val_u16: u16 = mem.read_memeory(addr) as u16;
+                    let mut val_u16: u16 = mem.read(addr) as u16;
                     val_u16 <<= 1;
                     if cpu_reg.p.c() {
                         val_u16 |= 1;
                     }
                     cpu_reg.p.set_c(val_u16 > 0xff);
                     let val_u8: u8 = val_u16 as u8;
-                    mem.write_memeory(addr, val_u8);
+                    mem.write(addr, val_u8);
                     // AND
                     cpu_reg.a &= val_u8;
                     cpu_reg.p.check_set_n(cpu_reg.a);
@@ -1117,7 +1153,7 @@ pub mod cpu {
                 }
                 Instruction::RRA => {
                     // [Unofficial& RMW ] ROR+AND
-                    let mut val_u16: u16 = mem.read_memeory(addr) as u16;
+                    let mut val_u16: u16 = mem.read(addr) as u16;
 
                     if cpu_reg.p.c() {
                         val_u16 |= 0x100;
@@ -1127,7 +1163,7 @@ pub mod cpu {
 
                     //ADC
                     let src = val_u16 as u8;
-                    mem.write_memeory(addr, src);
+                    mem.write(addr, src);
                     let reslt_u16: u16 = (cpu_reg.a as u16)
                         .wrapping_add(src as u16)
                         .wrapping_add(if cpu_reg.p.c() { 1u16 } else { 0u16 });
@@ -1144,10 +1180,10 @@ pub mod cpu {
                 Instruction::SLO => {
                     // [Unofficial& RMW ] ASL+ORA
                     // ASL
-                    let mut val = mem.read_memeory(addr);
+                    let mut val = mem.read(addr);
                     cpu_reg.p.check_set_c(val & 0x80);
                     val = val << 1;
-                    mem.write_memeory(addr, val);
+                    mem.write(addr, val);
                     // ORA
                     cpu_reg.a |= val;
                     cpu_reg.p.check_set_n(cpu_reg.a);
@@ -1155,10 +1191,10 @@ pub mod cpu {
                 }
                 Instruction::SRE => {
                     // LSR
-                    let mut val = mem.read_memeory(addr);
+                    let mut val = mem.read(addr);
                     cpu_reg.p.check_set_c(val & 0x1);
                     val = val >> 1;
-                    mem.write_memeory(addr, val);
+                    mem.write(addr, val);
                     // EOR
                     cpu_reg.a ^= val;
                     cpu_reg.p.check_set_n(cpu_reg.a);
@@ -1454,18 +1490,19 @@ pub mod cpu {
         InstruAddring { instru_name: "ISB", instru: Instruction::ISB,  instru_base_cycle : 7, addring_mode: AddressingMode::AbsXI },
     ];
 
-    pub fn execute_one_instruction(cpu_reg: &mut Register, mem: &mut MemMap) {
+    pub fn execute_one_instruction(core: &mut Core, mem: &mut MemMap) {
         let machine_code: u8;
+        let cpu_reg: &mut Register = &mut core.reg;
 
-        if mem.irq_counter != 0 {
-            mem.irq_counter -= 1;
-            if mem.irq_counter == 0 {
-                mem.irq_in_process = 1;
-                irq_handler(cpu_reg, mem);
+        if core.irq_counter != 0 {
+            core.irq_counter -= 1;
+            if core.irq_counter == 0 {
+                core.irq_in_process = 1;
+                core.irq_handler(mem);
                 return;
             }
         }
-        machine_code = mem.read_memeory(cpu_reg.pc);
+        machine_code = mem.read(cpu_reg.pc);
         // print!(
         //     "code addr {:#x}, machine_code {:#x}, ",
         //     cpu_reg.pc, machine_code
@@ -1475,13 +1512,13 @@ pub mod cpu {
         let instru_addring = &ISTRU_OP_CODE[machine_code as usize];
         cpu_cycles_add(instru_addring.instru_base_cycle as u32);
 
-        let op_addr = instru_addring.addring_mode.addressing(cpu_reg, mem);
+        let op_addr = instru_addring.addring_mode.addressing(core, mem);
         // print!(
         //     "asm instruction {}, operation addr {:#x}, ",
         //     instru_addring.instru_name, op_addr
         // );
 
-        instru_addring.instru.exec(cpu_reg, mem, op_addr);
+        instru_addring.instru.exec(core, mem, op_addr);
 
         // println!(
         //     "a {:#x}, x {:#x}, y {:#x}, p {:#x}, sp {:#x}, cycles {}",
@@ -1496,12 +1533,12 @@ pub mod cpu {
         cpu_cycles_end: u32,
     ) {
         while get_cpu_cycles() <= cpu_cycles_end {
-            execute_one_instruction(cpu_reg, mem);
+            execute_one_instruction(core, mem);
         }
     }
 
     pub fn execute_instruction_until_and_hook(
-        cpu_reg: &mut Register,
+        core: &mut Core,
         mem: &mut MemMap,
         cpu_cycles_end: u32,
         hook: fn(&mut Register, &mut MemMap, u32),
@@ -1509,9 +1546,9 @@ pub mod cpu {
         let mut t = get_cpu_cycles();
         let mut n;
         while t <= cpu_cycles_end {
-            execute_one_instruction(cpu_reg, mem);
+            execute_one_instruction(core, mem);
             n = get_cpu_cycles();
-            hook(cpu_reg, mem, n.saturating_sub(t));
+            hook(&mut core.reg, mem, n.saturating_sub(t));
             t = n;
         }
     }
@@ -1525,6 +1562,7 @@ pub mod apu {
     use crate::cpu2a03::memory::MemMap;
 
     use super::cpu::irq_req;
+    use super::Bus;
 
     /* DDLC VVVV
      Duty (D),
@@ -1810,7 +1848,7 @@ pub mod apu {
 
     pub struct Apu {
         reg: Register,
-        pub set_wave_reg: [fn(&mut Self, u8); 24],
+        pub set_wave_reg_func_tbl: [fn(&mut Self, u8); 24],
         cpu_clock_hz: u32,
         frame_counter: u8,
         pulse: [PulseDev; 2],
@@ -1980,35 +2018,8 @@ pub mod apu {
         }
     }
 
-    impl Apu {
-        // tv_system: 0 NTSC, 1 PAL
-        pub fn new(cpu_clock_hz: u32, sample_rate: u32, tv_system: u8) -> Self {
-            Apu {
-                reg: Default::default(),
-                #[rustfmt::skip]
-                set_wave_reg: [
-                    set_psulse_0, set_psulse_1, set_psulse_2, set_psulse_3,
-                    set_psulse_4, set_psulse_5, set_psulse_6, set_psulse_7,
-                    set_triangle_8, set_reg_nop, set_triangle_10, set_triangle_11,
-                    set_noise_12, set_reg_nop, set_noise_14, set_noise_15,
-                    set_dmc_16, set_dmc_17, set_dmc_18, set_dmc_19,
-                    set_reg_nop, set_status_ctrl_21, set_reg_nop, set_frame_counter_23,
-                ],
-                cpu_clock_hz,
-                frame_counter: 0,
-                pulse: [
-                    PulseDev::new(cpu_clock_hz, sample_rate),
-                    PulseDev::new(cpu_clock_hz, sample_rate),
-                ],
-                triangle: TriangleDev::new(cpu_clock_hz, sample_rate),
-                noise: NoiseDev::new(cpu_clock_hz, sample_rate),
-                dmc: DmcDev::new(cpu_clock_hz, sample_rate),
-                tv_system,
-                frame_int_flag: false,
-            }
-        }
-
-        pub fn get_wave_reg(&mut self, _addr: u16) -> u8 {
+    impl Bus for Apu {
+        fn read(&mut self, _addr: u16) -> u8 {
             let mut val = 0_u8;
             if self.pulse[0].length_counter != 0 {
                 val.set_bit(0, true);
@@ -2034,6 +2045,39 @@ pub mod apu {
             self.frame_int_flag = false;
 
             val
+        }
+
+        fn write(&mut self, addr: u16, val: u8) {
+            self.set_wave_reg_func_tbl[(addr & 0x1f) as usize](self, val);
+        }
+    }
+
+    impl Apu {
+        // tv_system: 0 NTSC, 1 PAL
+        pub fn new(cpu_clock_hz: u32, sample_rate: u32, tv_system: u8) -> Self {
+            Apu {
+                reg: Default::default(),
+                #[rustfmt::skip]
+                set_wave_reg_func_tbl: [
+                    set_psulse_0, set_psulse_1, set_psulse_2, set_psulse_3,
+                    set_psulse_4, set_psulse_5, set_psulse_6, set_psulse_7,
+                    set_triangle_8, set_reg_nop, set_triangle_10, set_triangle_11,
+                    set_noise_12, set_reg_nop, set_noise_14, set_noise_15,
+                    set_dmc_16, set_dmc_17, set_dmc_18, set_dmc_19,
+                    set_reg_nop, set_status_ctrl_21, set_reg_nop, set_frame_counter_23,
+                ],
+                cpu_clock_hz,
+                frame_counter: 0,
+                pulse: [
+                    PulseDev::new(cpu_clock_hz, sample_rate),
+                    PulseDev::new(cpu_clock_hz, sample_rate),
+                ],
+                triangle: TriangleDev::new(cpu_clock_hz, sample_rate),
+                noise: NoiseDev::new(cpu_clock_hz, sample_rate),
+                dmc: DmcDev::new(cpu_clock_hz, sample_rate),
+                tv_system,
+                frame_int_flag: false,
+            }
         }
 
         /*********************** Pulse channel **************************
@@ -2291,7 +2335,7 @@ pub mod apu {
                         if dmc.bit_indx == 8 {
                             if dmc.sample_length != 0 {
                                 //read data from prgrom
-                                dmc.load_data = mem.read_memeory(dmc.sample_address);
+                                dmc.load_data = mem.read(dmc.sample_address);
                                 // TODO: spend cpu cycles
                                 //The address is incremented; if it exceeds $FFFF, it is wrapped around to $8000.
                                 dmc.sample_address = dmc.sample_address.saturating_add(1) | 0x8000;
