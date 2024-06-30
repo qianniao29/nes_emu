@@ -21,7 +21,7 @@ use std::{
 };
 
 use common::error;
-use cpu2a03::{cpu, memory, apu, cycle::cpu_cycles_reset};
+use cpu2a03::{apu, cpu, cycle::cpu_cycles_reset, memory};
 use display::disp::{self, DisplayFunc};
 use display::display_sdl2::disp_sdl2;
 use input::input::InputFunc;
@@ -83,8 +83,8 @@ fn main() -> Result<(), error::CustomError> {
     /*------------------------------------------------------------------------------------*/
 
     /*------------------------------cpu Register init--------------------------------------------*/
-    let mut cpu_reg = cpu::Register::new();
-    reset(&mut cpu_reg, &mut mem);
+    let mut cpu = cpu::Core::new(Box::new(mem));
+    cpu.reset(&mut mem);
     /*------------------------------------------------------------------------------------*/
 
     let mut cpu_cycles_end;
@@ -121,10 +121,10 @@ fn main() -> Result<(), error::CustomError> {
             // execute code in one scanline cycles
             master_cycles += dis_std.master_cycles_scanline as u32;
             cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-            cpu::execute_instruction_until(&mut cpu_reg, &mut mem, cpu_cycles_end);
+            cpu.execute_instruction_until(&mut mem, cpu_cycles_end);
             // let snapshot_cyc = cpu::get_cpu_cycles();
             // while cpu::get_cpu_cycles() <= cpu_cycles_end {
-            //     cpu::execute_one_instruction(&mut cpu_reg, &mut mem);
+            //     cpu.execute_one_instruction(&mut mem);
             //     // sprite0 hit
             //     if sprite0_should_hit {
             //         let cyc_indx = cpu::get_cpu_cycles() - snapshot_cyc;
@@ -144,7 +144,7 @@ fn main() -> Result<(), error::CustomError> {
             /* all 262 line trigger 4 times, so trigger per 65 line. */
             if j == 65 || j == 130 || j == 195 {
                 // APU frame counter trigger
-            //    mem.apu_mem.frame_counter_trig(&mut mem);
+                //    mem.apu_mem.frame_counter_trig(&mut mem);
             }
 
             //dot 256, 257
@@ -191,16 +191,16 @@ fn main() -> Result<(), error::CustomError> {
         /*---------Post-render scanline-------*/
         master_cycles += dis_std.master_cycles_scanline as u32;
         cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-        cpu::execute_instruction_until(&mut cpu_reg, &mut mem, cpu_cycles_end);
+        cpu.execute_instruction_until(&mut mem, cpu_cycles_end);
         //sync horizon
 
         /*------------Vblank scanline------------*/
-        cpu::vblank(&mut cpu_reg, &mut mem);
+        cpu.vblank(&mut mem);
         // execute code after NMI
         for _ in 0..dis_std.vblank_length {
             master_cycles += dis_std.master_cycles_scanline as u32;
             cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-            cpu::execute_instruction_until(&mut cpu_reg, &mut mem, cpu_cycles_end);
+            cpu.execute_instruction_until(&mut mem, cpu_cycles_end);
             //sync horizon
         }
 
@@ -208,8 +208,7 @@ fn main() -> Result<(), error::CustomError> {
         //clear ppu status, vblank
         mem.ppu_reg.status.0 = 0;
 
-        cpu::execute_instruction_until(
-            &mut cpu_reg,
+        cpu.execute_instruction_until(
             &mut mem,
             dis_std.cpu_cycle_per_frame as u32 - if is_odd_frame { 3 } else { 0 },
         );

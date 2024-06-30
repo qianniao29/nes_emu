@@ -1,10 +1,21 @@
 #![allow(dead_code)]
 
 trait Bus {
-    fn read(&mut self, addr: u16) -> u8;
-    fn write(&mut self, addr: u16, val: u8);
-    fn push(&mut self, sp_piont: &mut u8, data: u8);
-    fn pop(&self, sp_piont: &mut u8) -> u8;
+    fn read(&mut self, addr: u16) -> u8 {
+        0
+    }
+    fn write(&mut self, addr: u16, val: u8) {}
+    fn push(&mut self, sp_piont: &mut u8, data: u8) {}
+    fn pop(&self, sp_piont: &mut u8) -> u8 {
+        0
+    }
+}
+
+trait Irq<T> {
+    fn nmi_handler(&mut self, data: T) {}
+    fn irq_handler(&mut self, data: T) {}
+    fn irq_req(&mut self) {}
+    fn irq_ack(&mut self) {}
 }
 
 pub mod cycle {
@@ -29,7 +40,6 @@ pub mod cycle {
 
 pub mod memory {
     use crate::cpu2a03::apu;
-    use crate::cpu2a03::cpu::irq_ack;
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::ppu2c02::ppu;
 
@@ -115,7 +125,8 @@ pub mod memory {
                     let off = (255 - self.ppu_reg.oam_addr + 1) as usize;
                     self.ppu_mem.oam[self.ppu_reg.oam_addr as usize..=255]
                         .clone_from_slice(&src[..off]);
-                    self.ppu_mem.oam[..self.ppu_reg.oam_addr as usize].clone_from_slice(&src[off..]);
+                    self.ppu_mem.oam[..self.ppu_reg.oam_addr as usize]
+                        .clone_from_slice(&src[off..]);
                 }
                 cpu_cycles_add(513);
                 if get_cpu_cycles() & 0x1 == 0x1 {
@@ -181,13 +192,12 @@ pub mod memory {
 }
 
 pub mod cpu {
+    use super::{Bus, Irq};
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::cpu2a03::memory::MemMap;
-    use super::Bus;
     use bitfield;
     use bitflags::bitflags;
     use std::fmt;
-
 
     /*
     address         size 	  describe
@@ -317,7 +327,7 @@ pub mod cpu {
                 a: 0,
                 x: 0,
                 y: 0,
-           }
+            }
         }
 
         pub fn reset(&mut self, mem: &mut MemMap) {
@@ -335,8 +345,8 @@ pub mod cpu {
         }
     }
 
-    struct Core{
-        pub reg:Register,
+    pub struct Core {
+        pub reg: Register,
         mem_bus: Box<dyn Bus>,
         pub irq_inhibit: bool,
         pub irq_counter: u8,
@@ -344,26 +354,8 @@ pub mod cpu {
         pub irq_in_process: u8,
     }
 
-    impl Core {
-        pub fn new(mem_bus: Box<dyn Bus>) -> Self {
-            Self{
-            reg : Register::new(),
-            mem_bus,
-            irq_inhibit: false,
-            irq_counter: 0,
-            irq_flag: 0,
-            irq_in_process: 0,
-            }
-        }
-        pub fn reset(&mut self, mem: &mut MemMap) {
-                self.reg.reset(mem);
-                self.irq_inhibit = false;
-                self.irq_counter= 0;
-                self.irq_flag= 0;
-                self.irq_in_process= 0; 
-        }
-
-        pub fn nmi_handler(&mut self, mem: &mut MemMap) {
+    impl Irq<&mut MemMap<'_>> for Core {
+        fn nmi_handler(&mut self, mem: &mut MemMap) {
             let mut val_pc = self.reg.pc;
             mem.push(&mut self.reg.sp, (val_pc >> 8) as u8);
             mem.push(&mut self.reg.sp, (val_pc & 0xff) as u8);
@@ -378,8 +370,8 @@ pub mod cpu {
             self.reg.pc = val_pc;
             cpu_cycles_add(7);
         }
-    
-        pub fn irq_handler(&mut self, mem: &mut MemMap) {
+
+        fn irq_handler(&mut self, mem: &mut MemMap) {
             let mut val_pc = self.reg.pc;
             mem.push(&mut self.reg.sp, (val_pc >> 8) as u8);
             mem.push(&mut self.reg.sp, (val_pc & 0xff) as u8);
@@ -394,24 +386,103 @@ pub mod cpu {
             self.reg.pc = val_pc;
             cpu_cycles_add(7);
         }
-    
-        pub fn irq_req(&mut self) {
+
+        fn irq_req(&mut self) {
             if self.irq_inhibit {
                 self.irq_flag = 1;
             } else {
                 self.irq_counter = 1;
             }
         }
-    
-        pub fn irq_ack(&mut self) {
+
+        fn irq_ack(&mut self) {
             self.irq_flag = 0;
             self.irq_counter = 0;
         }
-    
+    }
+
+    impl Core {
+        pub fn new(mem_bus: Box<dyn Bus>) -> Self {
+            Self {
+                reg: Register::new(),
+                mem_bus,
+                irq_inhibit: false,
+                irq_counter: 0,
+                irq_flag: 0,
+                irq_in_process: 0,
+            }
+        }
+        pub fn reset(&mut self, mem: &mut MemMap) {
+            self.reg.reset(mem);
+            self.irq_inhibit = false;
+            self.irq_counter = 0;
+            self.irq_flag = 0;
+            self.irq_in_process = 0;
+        }
+
         pub fn vblank(&mut self, mem: &mut MemMap) {
             mem.ppu_reg.status.set_v(true);
             if mem.ppu_reg.ctrl.v() {
                 self.nmi_handler(mem);
+            }
+        }
+
+        pub fn execute_one_instruction(&mut self, mem: &mut MemMap) {
+            let machine_code: u8;
+            let cpu_reg: &mut Register = &mut self.reg;
+
+            if self.irq_counter != 0 {
+                self.irq_counter -= 1;
+                if self.irq_counter == 0 {
+                    self.irq_in_process = 1;
+                    self.irq_handler(mem);
+                    return;
+                }
+            }
+            machine_code = mem.read(cpu_reg.pc);
+            // print!(
+            //     "code addr {:#x}, machine_code {:#x}, ",
+            //     cpu_reg.pc, machine_code
+            // );
+            cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
+
+            let instru_addring = &ISTRU_OP_CODE[machine_code as usize];
+            cpu_cycles_add(instru_addring.instru_base_cycle as u32);
+
+            let op_addr = instru_addring.addring_mode.addressing(self, mem);
+            // print!(
+            //     "asm instruction {}, operation addr {:#x}, ",
+            //     instru_addring.instru_name, op_addr
+            // );
+
+            instru_addring.instru.exec(self, mem, op_addr);
+
+            // println!(
+            //     "a {:#x}, x {:#x}, y {:#x}, p {:#x}, sp {:#x}, cycles {}",
+            //     cpu_reg.a, cpu_reg.x, cpu_reg.y, cpu_reg.p.0, cpu_reg.sp, get_cpu_cycles()
+            // );
+            // println!("{:#?}", instru_addring);
+        }
+
+        pub fn execute_instruction_until(&mut self, mem: &mut MemMap, cpu_cycles_end: u32) {
+            while get_cpu_cycles() <= cpu_cycles_end {
+                self.execute_one_instruction(mem);
+            }
+        }
+
+        pub fn execute_instruction_until_and_hook(
+            &mut self,
+            mem: &mut MemMap,
+            cpu_cycles_end: u32,
+            hook: fn(&mut Register, &mut MemMap, u32),
+        ) {
+            let mut t = get_cpu_cycles();
+            let mut n;
+            while t <= cpu_cycles_end {
+                self.execute_one_instruction(mem);
+                n = get_cpu_cycles();
+                hook(&mut self.reg, mem, n.saturating_sub(t));
+                t = n;
             }
         }
     }
@@ -438,7 +509,7 @@ pub mod cpu {
     }
 
     impl AddressingMode {
-        pub fn addressing(&self, core:&mut Core, mem: &mut MemMap) -> u16 {
+        pub fn addressing(&self, core: &mut Core, mem: &mut MemMap) -> u16 {
             let cpu_reg: &mut Register = &mut core.reg;
             match self {
                 AddressingMode::Acc => 0,
@@ -1049,7 +1120,8 @@ pub mod cpu {
                     let pch: u16 = mem.pop(&mut cpu_reg.sp) as u16;
                     cpu_reg.pc = pcl | (pch << 8);
                     // 清除计数
-                    core.irq_counter = core.irq_in_process & core.irq_flag & ((!cpu_reg.p.i()) as u8);
+                    core.irq_counter =
+                        core.irq_in_process & core.irq_flag & ((!cpu_reg.p.i()) as u8);
                     core.irq_in_process = 0;
                 }
                 //---  组合指令  ----------
@@ -1489,69 +1561,6 @@ pub mod cpu {
         InstruAddring { instru_name: "INC", instru: Instruction::INC,  instru_base_cycle : 7, addring_mode: AddressingMode::AbsXI },
         InstruAddring { instru_name: "ISB", instru: Instruction::ISB,  instru_base_cycle : 7, addring_mode: AddressingMode::AbsXI },
     ];
-
-    pub fn execute_one_instruction(core: &mut Core, mem: &mut MemMap) {
-        let machine_code: u8;
-        let cpu_reg: &mut Register = &mut core.reg;
-
-        if core.irq_counter != 0 {
-            core.irq_counter -= 1;
-            if core.irq_counter == 0 {
-                core.irq_in_process = 1;
-                core.irq_handler(mem);
-                return;
-            }
-        }
-        machine_code = mem.read(cpu_reg.pc);
-        // print!(
-        //     "code addr {:#x}, machine_code {:#x}, ",
-        //     cpu_reg.pc, machine_code
-        // );
-        cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
-
-        let instru_addring = &ISTRU_OP_CODE[machine_code as usize];
-        cpu_cycles_add(instru_addring.instru_base_cycle as u32);
-
-        let op_addr = instru_addring.addring_mode.addressing(core, mem);
-        // print!(
-        //     "asm instruction {}, operation addr {:#x}, ",
-        //     instru_addring.instru_name, op_addr
-        // );
-
-        instru_addring.instru.exec(core, mem, op_addr);
-
-        // println!(
-        //     "a {:#x}, x {:#x}, y {:#x}, p {:#x}, sp {:#x}, cycles {}",
-        //     cpu_reg.a, cpu_reg.x, cpu_reg.y, cpu_reg.p.0, cpu_reg.sp, get_cpu_cycles()
-        // );
-        // println!("{:#?}", instru_addring);
-    }
-
-    pub fn execute_instruction_until(
-        cpu_reg: &mut Register,
-        mem: &mut MemMap,
-        cpu_cycles_end: u32,
-    ) {
-        while get_cpu_cycles() <= cpu_cycles_end {
-            execute_one_instruction(core, mem);
-        }
-    }
-
-    pub fn execute_instruction_until_and_hook(
-        core: &mut Core,
-        mem: &mut MemMap,
-        cpu_cycles_end: u32,
-        hook: fn(&mut Register, &mut MemMap, u32),
-    ) {
-        let mut t = get_cpu_cycles();
-        let mut n;
-        while t <= cpu_cycles_end {
-            execute_one_instruction(core, mem);
-            n = get_cpu_cycles();
-            hook(&mut core.reg, mem, n.saturating_sub(t));
-            t = n;
-        }
-    }
 }
 
 pub mod apu {
@@ -1561,8 +1570,8 @@ pub mod apu {
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::cpu2a03::memory::MemMap;
 
-    use super::cpu::irq_req;
     use super::Bus;
+    use super::Irq;
 
     /* DDLC VVVV
      Duty (D),
