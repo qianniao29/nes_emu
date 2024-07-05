@@ -57,13 +57,35 @@ fn main() -> Result<(), error::CustomError> {
     /*------------------------------input init--------------------------------------------*/
     let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
     /*------------------------------------------------------------------------------------*/
-
+    let mut mem;
+    let mut cpu;
     /*------------------------------sound init--------------------------------------------*/
     // let sound = ;
     /*------------------------------------------------------------------------------------*/
 
+    /*------------------------------APU init--------------------------------------------*/
+    let mut apu = apu::Apu::new(
+        dis_std.cpu_clock_hz,
+        dis_std.cpu_clock_hz,
+        tv_system,
+        Box::new(cpu),
+        Box::new(mem),
+    );
+    /*------------------------------------------------------------------------------------*/
+
+    /*------------------------------PPU init--------------------------------------------*/
+    let mut ppu = ppu::Ppu::new(Box::new(cpu));
+    /*------------------------------------------------------------------------------------*/
+
     /*------------------------------cpu memory init--------------------------------------------*/
-    let mut mem = memory::MemMap::new(dis_std.cpu_clock_hz, dis_std.cpu_clock_hz, tv_system);
+    mem = memory::MemMap::new(
+        dis_std.cpu_clock_hz,
+        dis_std.cpu_clock_hz,
+        tv_system,
+        Box::new(cpu),
+        Box::new(apu),
+        Box::new(ppu),
+    );
 
     let mut offset = 0;
     if head.prgrom_size_16k > 1 {
@@ -76,14 +98,14 @@ fn main() -> Result<(), error::CustomError> {
         &prgrom_buf[offset + 0x2000..offset + 0x4000],
     ];
     for i in 0..8 {
-        mem.ppu_mem.bank[i] = pattern_buff1k[i].clone();
+        ppu.mem.bank[i] = pattern_buff1k[i].clone();
     }
-    mem.ppu_mem
+    ppu.mem
         .mapping_name_table(head.flag6.four_screen(), head.flag6.mirror_flag());
     /*------------------------------------------------------------------------------------*/
 
     /*------------------------------cpu Register init--------------------------------------------*/
-    let mut cpu = cpu::Core::new(Box::new(mem));
+    cpu = cpu::Core::new(Box::new(mem));
     cpu.reset(&mut mem);
     /*------------------------------------------------------------------------------------*/
 
@@ -98,24 +120,19 @@ fn main() -> Result<(), error::CustomError> {
         let (mut sprite0_x, mut sprite0_y) = (0xff, 0xff);
         let mut sprite0_should_hit;
 
-        if mem.ppu_reg.mask.s() && mem.ppu_reg.mask.bg() {
+        if ppu.reg.mask.s() && ppu.reg.mask.bg() {
             sprite0_check_buf = [0_u8; 16];
-            (sprite0_x, sprite0_y) =
-                ppu::get_sprint0(&mem.ppu_reg, &mut mem.ppu_mem, &mut sprite0_check_buf);
+            (sprite0_x, sprite0_y) = ppu.get_sprint0(&mut sprite0_check_buf);
         }
 
         /*------------Visible scanlines------------*/
         for j in 0..240 {
-            if mem.ppu_reg.mask.bg() {
+            if ppu.reg.mask.bg() {
                 // render background
-                ppu::render_bg_scanline(
-                    &mut mem.ppu_reg,
-                    &mut mem.ppu_mem,
-                    &mut disp.scanline_color_indx,
-                );
+                ppu.render_bg_scanline(&mut disp.scanline_color_indx);
                 //genert bg platette data
-                disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[0..16]);
-                disp.draw_bg_scanline(if mem.ppu_reg.mask.bm() { 0 } else { 8 }, j);
+                disp.generate_palette_data(&ppu.mem.palette_indx_tbl[0..16]);
+                disp.draw_bg_scanline(if ppu.reg.mask.bm() { 0 } else { 8 }, j);
             }
 
             // execute code in one scanline cycles
@@ -148,43 +165,37 @@ fn main() -> Result<(), error::CustomError> {
             }
 
             //dot 256, 257
-            if mem.ppu_reg.mask.bg() {
-                ppu::coarse_y_wrapping(&mut mem.ppu_reg);
-                ppu::cpoy_x_from_t_to_v(&mut mem.ppu_reg);
+            if ppu.reg.mask.bg() {
+                ppu.coarse_y_wrapping();
+                ppu.cpoy_x_from_t_to_v();
             }
             //sync horizon
 
             //check sprite0 hiting
             sprite0_should_hit = false;
-            if mem.ppu_reg.mask.bg() {
-                sprite0_should_hit = ppu::check_sprint0_hit(
+            if ppu.reg.mask.bg() {
+                sprite0_should_hit = ppu.check_sprint0_hit(
                     j,
                     sprite0_x,
                     sprite0_y,
-                    &mut mem.ppu_reg,
                     &sprite0_check_buf,
                     &disp.scanline_color_indx,
                 );
             }
             if sprite0_should_hit {
-                mem.ppu_reg.status.set_s(true);
+                ppu.reg.status.set_s(true);
             }
 
             //render sprite
-            if mem.ppu_reg.mask.bg() || mem.ppu_reg.mask.s() {
-                ppu::render_sprite_scanline(
-                    j,
-                    &mut mem.ppu_reg,
-                    &mut mem.ppu_mem,
-                    &mut disp.scanline_color_indx,
-                );
+            if ppu.reg.mask.bg() || ppu.reg.mask.s() {
+                ppu.render_sprite_scanline(j, &mut disp.scanline_color_indx);
             }
 
-            if mem.ppu_reg.mask.s() {
+            if ppu.reg.mask.s() {
                 //genert sprite platette data
-                disp.generate_palette_data(&mem.ppu_mem.palette_indx_tbl[16..32]);
+                disp.generate_palette_data(&ppu.mem.palette_indx_tbl[16..32]);
                 //actually, sprite y is + 1
-                disp.draw_sprite_scanline(if mem.ppu_reg.mask.sm() { 0 } else { 8 }, j);
+                disp.draw_sprite_scanline(if ppu.reg.mask.sm() { 0 } else { 8 }, j);
             }
         }
 
@@ -195,7 +206,7 @@ fn main() -> Result<(), error::CustomError> {
         //sync horizon
 
         /*------------Vblank scanline------------*/
-        cpu.vblank(&mut mem);
+        ppu.vblank();
         // execute code after NMI
         for _ in 0..dis_std.vblank_length {
             master_cycles += dis_std.master_cycles_scanline as u32;
@@ -206,7 +217,7 @@ fn main() -> Result<(), error::CustomError> {
 
         /*------------Pre-render scanlines------------*/
         //clear ppu status, vblank
-        mem.ppu_reg.status.0 = 0;
+        ppu.reg.status.0 = 0;
 
         cpu.execute_instruction_until(
             &mut mem,
@@ -216,8 +227,8 @@ fn main() -> Result<(), error::CustomError> {
 
         //APU frame counter trigger 4th time
 
-        if mem.ppu_reg.mask.bg() {
-            ppu::cpoy_y_from_t_to_v(&mut mem.ppu_reg);
+        if ppu.reg.mask.bg() {
+            ppu.cpoy_y_from_t_to_v();
         }
 
         disp.display_present();

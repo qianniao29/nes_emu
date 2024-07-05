@@ -1,3 +1,5 @@
+use std::usize;
+
 pub mod error {
     use std::fmt::{Display, Formatter};
     use std::io::Error as IoError;
@@ -48,4 +50,23 @@ pub mod error {
             CustomError::Utf8Error(s)
         }
     }
+}
+
+pub trait Bus {
+    fn read(&mut self, addr: u16) -> u8 {
+        0
+    }
+    fn write(&mut self, addr: u16, val: u8) {}
+    fn dma_write(&mut self, addr: u16, src: &[u8], len: usize) {}
+    fn push(&mut self, sp_piont: &mut u8, data: u8) {}
+    fn pop(&self, sp_piont: &mut u8) -> u8 {
+        0
+    }
+}
+
+pub trait Irq {
+    fn nmi_handler(&mut self) {}
+    fn irq_handler(&mut self) {}
+    fn irq_req(&mut self) {}
+    fn irq_ack(&mut self) {}
 }

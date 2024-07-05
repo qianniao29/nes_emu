@@ -1,23 +1,5 @@
 #![allow(dead_code)]
 
-trait Bus {
-    fn read(&mut self, addr: u16) -> u8 {
-        0
-    }
-    fn write(&mut self, addr: u16, val: u8) {}
-    fn push(&mut self, sp_piont: &mut u8, data: u8) {}
-    fn pop(&self, sp_piont: &mut u8) -> u8 {
-        0
-    }
-}
-
-trait Irq<T> {
-    fn nmi_handler(&mut self, data: T) {}
-    fn irq_handler(&mut self, data: T) {}
-    fn irq_req(&mut self) {}
-    fn irq_ack(&mut self) {}
-}
-
 pub mod cycle {
     static mut CPU_CYCLES: u32 = 0;
 
@@ -39,21 +21,19 @@ pub mod cycle {
 }
 
 pub mod memory {
+    use crate::common::{Bus, Irq};
     use crate::cpu2a03::apu;
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::ppu2c02::ppu;
 
-    use super::Bus;
-
     pub struct MemMap<'a> {
         pub ram: [u8; 0x800],
-        pub ppu_reg: ppu::Register,
-        pub apu: apu::Apu,
         pub sram: [u8; 0x2000], // save RAM
         pub prg_rom: [&'a [u8]; 4],
         pub key: [[u8; 8]; 2],
         pub key_indx: [usize; 2],
-        pub ppu_mem: ppu::MemMap,
+        bus_to_apu: Box<dyn Bus>,
+        bus_to_ppu: Box<dyn Bus>,
     }
 
     impl Bus for MemMap<'_> {
@@ -69,7 +49,7 @@ pub mod memory {
                     // 高三位为 0: [$0000, $2000): 系统主内存，4 次镜像
                     0 => self.ram[i & 0x7ff],
                     // 高三位为 1, [$2000, $4000): PPU 寄存器，8 字节步进镜像
-                    1 => self.ppu_reg.read(&mut self.ppu_mem, addr),
+                    1 => self.bus_to_ppu.read(addr),
                     // 高三位为 2, [$4000, $6000): pAPU 寄存器 扩展 ROM 区
                     2 => {
                         if addr == 0x4016 {
@@ -87,8 +67,7 @@ pub mod memory {
                             }
                             val
                         } else if addr == 0x4015 {
-                            irq_ack(self);
-                            self.apu.read(addr)
+                            self.bus_to_apu.read(addr)
                         } else {
                             0
                         }
@@ -119,15 +98,7 @@ pub mod memory {
                     }
                     _ => unreachable!("Out of memory range!"),
                 };
-                if self.ppu_reg.oam_addr == 0 {
-                    self.ppu_mem.oam.clone_from_slice(src);
-                } else {
-                    let off = (255 - self.ppu_reg.oam_addr + 1) as usize;
-                    self.ppu_mem.oam[self.ppu_reg.oam_addr as usize..=255]
-                        .clone_from_slice(&src[..off]);
-                    self.ppu_mem.oam[..self.ppu_reg.oam_addr as usize]
-                        .clone_from_slice(&src[off..]);
-                }
+                self.bus_to_ppu.dma_write(0, src, 255);
                 cpu_cycles_add(513);
                 if get_cpu_cycles() & 0x1 == 0x1 {
                     cpu_cycles_add(1);
@@ -139,7 +110,7 @@ pub mod memory {
                     self.ram[i & 0x7ff] = val;
                 }
                 1 => {
-                    self.ppu_reg.write(&mut self.ppu_mem, addr, val);
+                    self.bus_to_ppu.write(addr, val);
                 }
                 2 => {
                     if addr == 0x4014 {
@@ -151,7 +122,7 @@ pub mod memory {
                             self.key_indx[1] = 0;
                         }
                     } else if addr < 0x4020 {
-                        self.apu.write(addr, val);
+                        self.bus_to_apu.write(addr, val);
                     }
                 }
                 3 => {
@@ -176,23 +147,29 @@ pub mod memory {
     }
 
     impl MemMap<'_> {
-        pub fn new(cpu_clock_hz: u32, apu_sample_rate: u32, tv_system: u8) -> Self {
+        pub fn new(
+            cpu_clock_hz: u32,
+            apu_sample_rate: u32,
+            tv_system: u8,
+            irq: Box<dyn Irq>,
+            apu: Box<dyn Bus>,
+            ppu: Box<dyn Bus>,
+        ) -> Self {
             MemMap {
                 ram: [0; 0x800],
-                ppu_reg: ppu::Register::new(),
-                apu: apu::Apu::new(cpu_clock_hz, apu_sample_rate, tv_system),
                 key: [[0; 8]; 2],
                 key_indx: [0; 2],
                 sram: [0; 0x2000],
                 prg_rom: Default::default(),
-                ppu_mem: ppu::MemMap::new(),
+                bus_to_apu: apu,
+                bus_to_ppu: ppu,
             }
         }
     }
 }
 
 pub mod cpu {
-    use super::{Bus, Irq};
+    use crate::common::{Bus, Irq};
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::cpu2a03::memory::MemMap;
     use bitfield;
@@ -347,42 +324,46 @@ pub mod cpu {
 
     pub struct Core {
         pub reg: Register,
-        mem_bus: Box<dyn Bus>,
         pub irq_inhibit: bool,
         pub irq_counter: u8,
         pub irq_flag: u8,
         pub irq_in_process: u8,
+        bus_to_cpu_mem: Box<dyn Bus>,
     }
 
-    impl Irq<&mut MemMap<'_>> for Core {
-        fn nmi_handler(&mut self, mem: &mut MemMap) {
+    impl Irq for Core {
+        fn nmi_handler(&mut self) {
             let mut val_pc = self.reg.pc;
-            mem.push(&mut self.reg.sp, (val_pc >> 8) as u8);
-            mem.push(&mut self.reg.sp, (val_pc & 0xff) as u8);
-            mem.push(
+            self.bus_to_cpu_mem
+                .push(&mut self.reg.sp, (val_pc >> 8) as u8);
+            self.bus_to_cpu_mem
+                .push(&mut self.reg.sp, (val_pc & 0xff) as u8);
+            self.bus_to_cpu_mem.push(
                 &mut self.reg.sp,
                 (self.reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
             );
             self.reg.p.set_i(true);
             self.irq_inhibit = true;
-            val_pc = mem.read(NMI_VECT_ADDR) as u16;
-            val_pc |= (mem.read(NMI_VECT_ADDR + 1) as u16) << 8;
+            val_pc = self.bus_to_cpu_mem.read(NMI_VECT_ADDR) as u16;
+            val_pc |= (self.bus_to_cpu_mem.read(NMI_VECT_ADDR + 1) as u16) << 8;
             self.reg.pc = val_pc;
             cpu_cycles_add(7);
         }
 
-        fn irq_handler(&mut self, mem: &mut MemMap) {
+        fn irq_handler(&mut self) {
             let mut val_pc = self.reg.pc;
-            mem.push(&mut self.reg.sp, (val_pc >> 8) as u8);
-            mem.push(&mut self.reg.sp, (val_pc & 0xff) as u8);
-            mem.push(
+            self.bus_to_cpu_mem
+                .push(&mut self.reg.sp, (val_pc >> 8) as u8);
+            self.bus_to_cpu_mem
+                .push(&mut self.reg.sp, (val_pc & 0xff) as u8);
+            self.bus_to_cpu_mem.push(
                 &mut self.reg.sp,
                 (self.reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
             );
             self.reg.p.set_i(true);
             self.irq_inhibit = true;
-            val_pc = mem.read(IRQ_VECT_ADDR) as u16;
-            val_pc |= (mem.read(IRQ_VECT_ADDR + 1) as u16) << 8;
+            val_pc = self.bus_to_cpu_mem.read(IRQ_VECT_ADDR) as u16;
+            val_pc |= (self.bus_to_cpu_mem.read(IRQ_VECT_ADDR + 1) as u16) << 8;
             self.reg.pc = val_pc;
             cpu_cycles_add(7);
         }
@@ -402,14 +383,14 @@ pub mod cpu {
     }
 
     impl Core {
-        pub fn new(mem_bus: Box<dyn Bus>) -> Self {
+        pub fn new(mem: Box<dyn Bus>) -> Self {
             Self {
                 reg: Register::new(),
-                mem_bus,
                 irq_inhibit: false,
                 irq_counter: 0,
                 irq_flag: 0,
                 irq_in_process: 0,
+                bus_to_cpu_mem: mem,
             }
         }
         pub fn reset(&mut self, mem: &mut MemMap) {
@@ -420,13 +401,6 @@ pub mod cpu {
             self.irq_in_process = 0;
         }
 
-        pub fn vblank(&mut self, mem: &mut MemMap) {
-            mem.ppu_reg.status.set_v(true);
-            if mem.ppu_reg.ctrl.v() {
-                self.nmi_handler(mem);
-            }
-        }
-
         pub fn execute_one_instruction(&mut self, mem: &mut MemMap) {
             let machine_code: u8;
             let cpu_reg: &mut Register = &mut self.reg;
@@ -435,7 +409,7 @@ pub mod cpu {
                 self.irq_counter -= 1;
                 if self.irq_counter == 0 {
                     self.irq_in_process = 1;
-                    self.irq_handler(mem);
+                    self.irq_handler();
                     return;
                 }
             }
@@ -1567,11 +1541,9 @@ pub mod apu {
     use bitfield::{Bit, BitMut};
     use blip_buf::BlipBuf;
 
+    use crate::common::{Bus, Irq};
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::cpu2a03::memory::MemMap;
-
-    use super::Bus;
-    use super::Irq;
 
     /* DDLC VVVV
      Duty (D),
@@ -1866,6 +1838,8 @@ pub mod apu {
         dmc: DmcDev,
         tv_system: u8,
         frame_int_flag: bool,
+        irq: Box<dyn Irq>,
+        bus_to_cpu_mem: Box<dyn Bus>,
     }
     fn set_reg_nop(_: &mut Apu, _: u8) {}
     fn set_psulse_0(apu_dev: &mut Apu, val: u8) {
@@ -2028,8 +2002,11 @@ pub mod apu {
     }
 
     impl Bus for Apu {
-        fn read(&mut self, _addr: u16) -> u8 {
+        fn read(&mut self, addr: u16) -> u8 {
             let mut val = 0_u8;
+
+            self.irq.irq_ack();
+
             if self.pulse[0].length_counter != 0 {
                 val.set_bit(0, true);
             }
@@ -2063,7 +2040,13 @@ pub mod apu {
 
     impl Apu {
         // tv_system: 0 NTSC, 1 PAL
-        pub fn new(cpu_clock_hz: u32, sample_rate: u32, tv_system: u8) -> Self {
+        pub fn new(
+            cpu_clock_hz: u32,
+            sample_rate: u32,
+            tv_system: u8,
+            irq: Box<dyn Irq>,
+            mem_bus: Box<dyn Bus>,
+        ) -> Self {
             Apu {
                 reg: Default::default(),
                 #[rustfmt::skip]
@@ -2086,6 +2069,8 @@ pub mod apu {
                 dmc: DmcDev::new(cpu_clock_hz, sample_rate),
                 tv_system,
                 frame_int_flag: false,
+                irq,
+                bus_to_cpu_mem: mem_bus,
             }
         }
 
@@ -2328,7 +2313,7 @@ pub mod apu {
             Reader ---> Buffer ---> Shifter ---> Output level ---> (to the mixer)
         *******************************************************************************/
         #[inline(always)]
-        fn trig_dmc_timer(&mut self, cpu_ticks: u32, mem: &mut MemMap) {
+        fn trig_dmc_timer(&mut self, cpu_ticks: u32) {
             let dmc = &mut self.dmc;
             let apu_reg: &Register = &self.reg;
 
@@ -2344,7 +2329,7 @@ pub mod apu {
                         if dmc.bit_indx == 8 {
                             if dmc.sample_length != 0 {
                                 //read data from prgrom
-                                dmc.load_data = mem.read(dmc.sample_address);
+                                dmc.load_data = self.bus_to_cpu_mem.read(dmc.sample_address);
                                 // TODO: spend cpu cycles
                                 //The address is incremented; if it exceeds $FFFF, it is wrapped around to $8000.
                                 dmc.sample_address = dmc.sample_address.saturating_add(1) | 0x8000;
@@ -2385,7 +2370,7 @@ pub mod apu {
             e e e e    e e e - e    Envelope and linear counter
         */
         #[inline]
-        fn frame_counter_trig_mode0(&mut self, mem: &mut MemMap) {
+        fn frame_counter_trig_mode0(&mut self) {
             let cpu_now_cycles = get_cpu_cycles();
 
             if (self.frame_counter & 0x1) == 0x1 {
@@ -2399,7 +2384,7 @@ pub mod apu {
                 //IRQ
                 if self.reg.frame_counter_ctrl.irq_inhibit_flag() == false {
                     self.frame_int_flag = true;
-                    irq_req(mem);
+                    self.irq.irq_req();
                 }
             }
             self.trig_pulse_envelope(0);
@@ -2410,12 +2395,12 @@ pub mod apu {
             self.trig_pulse_timer(1, cpu_now_cycles);
             self.trig_triangle_timer(cpu_now_cycles);
             self.trig_noise_timer(cpu_now_cycles);
-            self.trig_dmc_timer(cpu_now_cycles, mem);
+            self.trig_dmc_timer(cpu_now_cycles);
 
             self.frame_counter = (self.frame_counter + 1) & 0x3;
         }
         #[inline]
-        fn frame_counter_trig_mode1(&mut self, mem: &mut MemMap) {
+        fn frame_counter_trig_mode1(&mut self) {
             let cpu_now_cycles = get_cpu_cycles();
 
             if self.frame_counter == 0x1 || self.frame_counter == 0x4 {
@@ -2435,14 +2420,14 @@ pub mod apu {
             self.trig_pulse_timer(1, cpu_now_cycles);
             self.trig_triangle_timer(cpu_now_cycles);
             self.trig_noise_timer(cpu_now_cycles);
-            self.trig_dmc_timer(cpu_now_cycles, mem);
+            self.trig_dmc_timer(cpu_now_cycles);
 
             self.frame_counter += 1;
             if self.frame_counter > 4 {
                 self.frame_counter = 0;
             }
         }
-        pub fn frame_counter_trig(&mut self, mem: &mut MemMap) {
+        pub fn frame_counter_trig(&mut self) {
             /*  mode 0:    mode 1:       function
                 ---------  -----------  -----------------------------
                 - - - f    - - - - -    IRQ (if bit 6 is clear)
@@ -2450,9 +2435,9 @@ pub mod apu {
                 e e e e    e e e - e    Envelope and linear counter
             */
             if self.reg.frame_counter_ctrl.mode() {
-                self.frame_counter_trig_mode1(mem);
+                self.frame_counter_trig_mode1();
             } else {
-                self.frame_counter_trig_mode0(mem);
+                self.frame_counter_trig_mode0();
             }
         }
     }
