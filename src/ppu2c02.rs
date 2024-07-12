@@ -343,13 +343,13 @@ pub mod ppu {
         }
     }
 
-    pub struct Ppu {
+    pub struct Ppu<'a> {
         pub reg: self::Register,
         pub mem: self::MemMap,
-        irq: Box<dyn Irq>,
+        irq: &'a mut dyn Irq,
     }
 
-    impl Bus for Ppu {
+    impl Bus for Ppu<'_> {
         fn read(&mut self, addr: u16) -> u8 {
             match addr & 0x0007 {
                 0x0 | 0x1 | 0x3 | 0x5 | 0x6 => 0, //write only
@@ -450,9 +450,9 @@ pub mod ppu {
         }
     }
 
-    impl Ppu {
-        pub fn new(irq: Box<dyn Irq>) -> Self {
-            Self {
+    impl Ppu<'_> {
+        pub fn new<'a>(irq: &'a mut dyn Irq) -> Ppu<'_> {
+            Ppu {
                 reg: self::Register::new(),
                 mem: self::MemMap::new(),
                 irq,

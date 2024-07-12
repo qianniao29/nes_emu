@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use common::error;
+use common::{error, Bus};
 use cpu2a03::{apu, cpu, cycle::cpu_cycles_reset, memory};
 use display::disp::{self, DisplayFunc};
 use display::display_sdl2::disp_sdl2;
@@ -30,9 +30,13 @@ use ppu2c02::ppu;
 use rom_fs::rom;
 use sound::sound_base::snd_base;
 
+struct DummyBus;
+
+impl Bus for DummyBus {}
+
 #[inline(always)]
-fn reset(cpu_reg: &mut cpu::Register, mem: &mut memory::MemMap) {
-    cpu_reg.reset(mem);
+fn reset(cpu:&mut cpu::Core) {
+    cpu.reset();
 }
 
 fn main() -> Result<(), error::CustomError> {
@@ -42,6 +46,8 @@ fn main() -> Result<(), error::CustomError> {
 
     let (head, prgrom_buf, pattern_buff1k) = rom::load_rom(file_name)?;
     // println!("head:{:#?}",head);
+    let mut dummy = DummyBus {};
+    let mut dummy2 = DummyBus {};
 
     /*------------------------------display init------------------------------------------*/
     let mut disp = disp_sdl2::DispSDL2::new();
@@ -57,35 +63,13 @@ fn main() -> Result<(), error::CustomError> {
     /*------------------------------input init--------------------------------------------*/
     let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
     /*------------------------------------------------------------------------------------*/
-    let mut mem;
-    let mut cpu;
+
     /*------------------------------sound init--------------------------------------------*/
     // let sound = ;
     /*------------------------------------------------------------------------------------*/
 
-    /*------------------------------APU init--------------------------------------------*/
-    let mut apu = apu::Apu::new(
-        dis_std.cpu_clock_hz,
-        dis_std.cpu_clock_hz,
-        tv_system,
-        Box::new(cpu),
-        Box::new(mem),
-    );
-    /*------------------------------------------------------------------------------------*/
-
-    /*------------------------------PPU init--------------------------------------------*/
-    let mut ppu = ppu::Ppu::new(Box::new(cpu));
-    /*------------------------------------------------------------------------------------*/
-
     /*------------------------------cpu memory init--------------------------------------------*/
-    mem = memory::MemMap::new(
-        dis_std.cpu_clock_hz,
-        dis_std.cpu_clock_hz,
-        tv_system,
-        Box::new(cpu),
-        Box::new(apu),
-        Box::new(ppu),
-    );
+    let mut mem = memory::MemMap::new(&mut dummy, &mut dummy2);
 
     let mut offset = 0;
     if head.prgrom_size_16k > 1 {
@@ -97,16 +81,31 @@ fn main() -> Result<(), error::CustomError> {
         &prgrom_buf[offset + 0x00..offset + 0x2000],
         &prgrom_buf[offset + 0x2000..offset + 0x4000],
     ];
+    /*------------------------------------------------------------------------------------*/
+
+    /*------------------------------cpu Register init--------------------------------------------*/
+    let mut cpu = cpu::Core::new(&mut mem);
+    reset(&mut cpu);
+    /*------------------------------------------------------------------------------------*/
+
+    /*------------------------------PPU init--------------------------------------------*/
+    let mut ppu = ppu::Ppu::new(&mut cpu);
     for i in 0..8 {
         ppu.mem.bank[i] = pattern_buff1k[i].clone();
     }
     ppu.mem
         .mapping_name_table(head.flag6.four_screen(), head.flag6.mirror_flag());
+
     /*------------------------------------------------------------------------------------*/
 
-    /*------------------------------cpu Register init--------------------------------------------*/
-    cpu = cpu::Core::new(Box::new(mem));
-    cpu.reset(&mut mem);
+    /*------------------------------APU init--------------------------------------------*/
+    let mut _apu = apu::Apu::new(
+        dis_std.cpu_clock_hz,
+        dis_std.cpu_clock_hz,
+        tv_system,
+        &mut cpu,
+        &mut mem,
+    );
     /*------------------------------------------------------------------------------------*/
 
     let mut cpu_cycles_end;

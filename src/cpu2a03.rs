@@ -32,8 +32,8 @@ pub mod memory {
         pub prg_rom: [&'a [u8]; 4],
         pub key: [[u8; 8]; 2],
         pub key_indx: [usize; 2],
-        bus_to_apu: Box<dyn Bus>,
-        bus_to_ppu: Box<dyn Bus>,
+        bus_to_apu: &'a mut dyn Bus,
+        bus_to_ppu: &'a mut dyn Bus,
     }
 
     impl Bus for MemMap<'_> {
@@ -147,14 +147,7 @@ pub mod memory {
     }
 
     impl MemMap<'_> {
-        pub fn new(
-            cpu_clock_hz: u32,
-            apu_sample_rate: u32,
-            tv_system: u8,
-            irq: Box<dyn Irq>,
-            apu: Box<dyn Bus>,
-            ppu: Box<dyn Bus>,
-        ) -> Self {
+        pub fn new<'a>(apu: &'a mut dyn Bus, ppu: &'a mut dyn Bus) -> MemMap<'a> {
             MemMap {
                 ram: [0; 0x800],
                 key: [[0; 8]; 2],
@@ -307,10 +300,7 @@ pub mod cpu {
             }
         }
 
-        pub fn reset(&mut self, mem: &mut MemMap) {
-            let pcl = mem.read(REST_VECT_ADDR);
-            let pch = mem.read(REST_VECT_ADDR + 1);
-
+        pub fn reset(&mut self, pcl: u8, pch: u8) {
             *self = Register {
                 pc: (pch as u16) << 8 | (pcl as u16),
                 sp: 0xfd,
@@ -322,16 +312,16 @@ pub mod cpu {
         }
     }
 
-    pub struct Core {
+    pub struct Core<'a> {
         pub reg: Register,
         pub irq_inhibit: bool,
         pub irq_counter: u8,
         pub irq_flag: u8,
         pub irq_in_process: u8,
-        bus_to_cpu_mem: Box<dyn Bus>,
+        bus_to_cpu_mem: &'a mut dyn Bus,
     }
 
-    impl Irq for Core {
+    impl Irq for Core<'_> {
         fn nmi_handler(&mut self) {
             let mut val_pc = self.reg.pc;
             self.bus_to_cpu_mem
@@ -382,9 +372,9 @@ pub mod cpu {
         }
     }
 
-    impl Core {
-        pub fn new(mem: Box<dyn Bus>) -> Self {
-            Self {
+    impl Core<'_> {
+        pub fn new<'a>(mem: &'a mut dyn Bus) -> Core<'a> {
+            Core {
                 reg: Register::new(),
                 irq_inhibit: false,
                 irq_counter: 0,
@@ -393,8 +383,11 @@ pub mod cpu {
                 bus_to_cpu_mem: mem,
             }
         }
-        pub fn reset(&mut self, mem: &mut MemMap) {
-            self.reg.reset(mem);
+        pub fn reset(&mut self) {
+            self.reg.reset(
+                self.bus_to_cpu_mem.read(REST_VECT_ADDR),
+                self.bus_to_cpu_mem.read(REST_VECT_ADDR + 1),
+            );
             self.irq_inhibit = false;
             self.irq_counter = 0;
             self.irq_flag = 0;
@@ -1538,6 +1531,9 @@ pub mod cpu {
 }
 
 pub mod apu {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use bitfield::{Bit, BitMut};
     use blip_buf::BlipBuf;
 
@@ -1827,9 +1823,9 @@ pub mod apu {
         }
     }
 
-    pub struct Apu {
+    pub struct Apu<'a> {
         reg: Register,
-        pub set_wave_reg_func_tbl: [fn(&mut Self, u8); 24],
+        set_wave_reg_func_tbl: [fn(&mut Apu, u8); 24],
         cpu_clock_hz: u32,
         frame_counter: u8,
         pulse: [PulseDev; 2],
@@ -1838,8 +1834,8 @@ pub mod apu {
         dmc: DmcDev,
         tv_system: u8,
         frame_int_flag: bool,
-        irq: Box<dyn Irq>,
-        bus_to_cpu_mem: Box<dyn Bus>,
+        irq: Rc<RefCell<&'a mut dyn Irq>>,
+        bus_to_cpu_mem: Rc<RefCell<&'a mut dyn Bus>>,
     }
     fn set_reg_nop(_: &mut Apu, _: u8) {}
     fn set_psulse_0(apu_dev: &mut Apu, val: u8) {
@@ -2001,11 +1997,12 @@ pub mod apu {
         }
     }
 
-    impl Bus for Apu {
-        fn read(&mut self, addr: u16) -> u8 {
+    impl Bus for Apu<'_> {
+        fn read(&mut self, _addr: u16) -> u8 {
             let mut val = 0_u8;
+            let mut irq = *self.irq.borrow_mut();
 
-            self.irq.irq_ack();
+            irq.irq_ack();
 
             if self.pulse[0].length_counter != 0 {
                 val.set_bit(0, true);
@@ -2038,15 +2035,15 @@ pub mod apu {
         }
     }
 
-    impl Apu {
+    impl Apu<'_> {
         // tv_system: 0 NTSC, 1 PAL
-        pub fn new(
+        pub fn new<'a>(
             cpu_clock_hz: u32,
             sample_rate: u32,
             tv_system: u8,
-            irq: Box<dyn Irq>,
-            mem_bus: Box<dyn Bus>,
-        ) -> Self {
+            irq: &'a mut dyn Irq,
+            mem_bus: &'a mut dyn Bus,
+        ) -> Apu<'a> {
             Apu {
                 reg: Default::default(),
                 #[rustfmt::skip]
@@ -2069,8 +2066,8 @@ pub mod apu {
                 dmc: DmcDev::new(cpu_clock_hz, sample_rate),
                 tv_system,
                 frame_int_flag: false,
-                irq,
-                bus_to_cpu_mem: mem_bus,
+                irq:Rc::new(RefCell::new(irq)),
+                bus_to_cpu_mem:Rc::new(RefCell::new( mem_bus)),
             }
         }
 
@@ -2319,6 +2316,7 @@ pub mod apu {
 
             let blip = &mut dmc.blip;
             let period = dmc.freq_div.period as u32;
+            let bus_to_cpu_mem = *self.bus_to_cpu_mem.borrow();
 
             //timer
             dmc.freq_div.count(cpu_ticks, |_, n| {
@@ -2329,7 +2327,7 @@ pub mod apu {
                         if dmc.bit_indx == 8 {
                             if dmc.sample_length != 0 {
                                 //read data from prgrom
-                                dmc.load_data = self.bus_to_cpu_mem.read(dmc.sample_address);
+                                dmc.load_data = bus_to_cpu_mem.read(dmc.sample_address);
                                 // TODO: spend cpu cycles
                                 //The address is incremented; if it exceeds $FFFF, it is wrapped around to $8000.
                                 dmc.sample_address = dmc.sample_address.saturating_add(1) | 0x8000;
@@ -2372,6 +2370,7 @@ pub mod apu {
         #[inline]
         fn frame_counter_trig_mode0(&mut self) {
             let cpu_now_cycles = get_cpu_cycles();
+            let mut irq = *self.irq.borrow_mut();
 
             if (self.frame_counter & 0x1) == 0x1 {
                 self.trig_pulse_length(0);
@@ -2384,7 +2383,7 @@ pub mod apu {
                 //IRQ
                 if self.reg.frame_counter_ctrl.irq_inhibit_flag() == false {
                     self.frame_int_flag = true;
-                    self.irq.irq_req();
+                    irq.irq_req();
                 }
             }
             self.trig_pulse_envelope(0);

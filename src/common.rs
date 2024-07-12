@@ -53,13 +53,13 @@ pub mod error {
 }
 
 pub trait Bus {
-    fn read(&mut self, addr: u16) -> u8 {
+    fn read(&mut self, _addr: u16) -> u8 {
         0
     }
-    fn write(&mut self, addr: u16, val: u8) {}
-    fn dma_write(&mut self, addr: u16, src: &[u8], len: usize) {}
-    fn push(&mut self, sp_piont: &mut u8, data: u8) {}
-    fn pop(&self, sp_piont: &mut u8) -> u8 {
+    fn write(&mut self, _addr: u16, _val: u8) {}
+    fn dma_write(&mut self, _addr: u16, _src: &[u8], _len: usize) {}
+    fn push(&mut self, _sp_piont: &mut u8, _data: u8) {}
+    fn pop(&self, _sp_piont: &mut u8) -> u8 {
         0
     }
 }
