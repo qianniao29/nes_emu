@@ -208,98 +208,123 @@ pub mod rom {
         pub exp_dev: u8,
     }
 
-    impl RomHead {
-        pub fn new(raw: &[u8]) -> Self {
+    impl Default for RomHead {
+        fn default() -> Self {
             Self {
-                id: [raw[0], raw[1], raw[2], raw[3]],
-                prgrom_size_16k: raw[4],
-                chrrom_size_8k: raw[5],
-                flag6: Flag6(raw[6]),
-                flag7: Flag7(raw[7]),
-                map_ext: MapperExt(raw[8]),
-                rom_size: RomSize(raw[9]),
-                prg_ram_size: RamSize(raw[10]),
-                chr_ram_size: RamSize(raw[11]),
-                timing: raw[12],
-                sys_type: SysType(raw[13]),
-                misc_rom: raw[14],
-                exp_dev: raw[15],
+                id: [0; 4],
+                prgrom_size_16k: 0,
+                chrrom_size_8k: 0,
+                flag6: Flag6(0),
+                flag7: Flag7(0),
+                map_ext: MapperExt(0),
+                rom_size: RomSize(0),
+                prg_ram_size: RamSize(0),
+                chr_ram_size: RamSize(0),
+                timing: 0,
+                sys_type: SysType(0),
+                misc_rom: 0,
+                exp_dev: 0,
             }
         }
     }
+    static mut PRG_BUF: Option<&Vec<u8>> = None;
 
-    pub fn read_head(file_name: &String) -> Result<(File, RomHead), Error> {
-        let mut rom_file = File::open(file_name)?;
-        let mut head_buf: [u8; 16] = [0; 16];
-        rom_file.read(&mut head_buf)?;
-        let head: RomHead = RomHead::new(&head_buf);
-
-        Ok((rom_file, head))
-    }
-
-    pub fn read_prgrom(
-        rom_file: &mut File,
-        prgrom_size_16k: u8,
-        trainer_flag: bool,
-    ) -> Result<Vec<u8>, Error> {
-        let prgrom_size: u32 = (prgrom_size_16k as u32) * 16 * 1024;
-
-        if trainer_flag {
-            rom_file.seek(SeekFrom::Current(512))?;
+    impl RomHead {
+        fn init(&mut self, raw: &[u8]) {
+            self.id = [raw[0], raw[1], raw[2], raw[3]];
+            self.prgrom_size_16k = raw[4];
+            self.chrrom_size_8k = raw[5];
+            self.flag6 = Flag6(raw[6]);
+            self.flag7 = Flag7(raw[7]);
+            self.map_ext = MapperExt(raw[8]);
+            self.rom_size = RomSize(raw[9]);
+            self.prg_ram_size = RamSize(raw[10]);
+            self.chr_ram_size = RamSize(raw[11]);
+            self.timing = raw[12];
+            self.sys_type = SysType(raw[13]);
+            self.misc_rom = raw[14];
+            self.exp_dev = raw[15];
         }
 
-        let mut prgrom_buf = Vec::new();
-        prgrom_buf.resize(prgrom_size as usize, 0);
-        rom_file.read(&mut prgrom_buf)?;
+        fn read_head(&mut self, file_name: &String) -> Result<File, Error> {
+            let mut rom_file = File::open(file_name)?;
+            let mut head_buf: [u8; 16] = [0; 16];
+            rom_file.read(&mut head_buf)?;
+            self.init(&head_buf);
 
-        Ok(prgrom_buf)
-    }
-
-    pub fn read_chrrom(
-        rom_file: &mut File,
-        chrrom_size_8k: u8,
-    ) -> Result<Vec<Rc<RefCell<Vec<u8>>>>, Error> {
-        let mut pattern_buff1k = Vec::new();
-        for _ in 0..(chrrom_size_8k * 8) {
-            let mut chrrom_buf = Vec::new();
-            chrrom_buf.resize(1024, 0);
-            rom_file.read(&mut chrrom_buf)?;
-            pattern_buff1k.push(Rc::new(RefCell::new(chrrom_buf)));
+            Ok(rom_file)
         }
 
-        Ok(pattern_buff1k)
-    }
+        fn read_prgrom(
+            rom_file: &mut File,
+            prgrom_size_16k: u8,
+            trainer_flag: bool,
+        ) -> Result<Vec<u8>, Error> {
+            let prgrom_size: u32 = (prgrom_size_16k as u32) * 16 * 1024;
 
-    pub fn load_rom(
-        file_name: &String,
-    ) -> Result<(RomHead, Vec<u8>, Vec<Rc<RefCell<Vec<u8>>>>), error::CustomError> {
-        let (mut rom_file, head) = read_head(file_name)?;
-        let head_id_str = std::str::from_utf8(&head.id[..])?;
-        if head_id_str != "NES\u{1a}" {
-            println!("Not support ROM type, {:?}", head.id);
+            if trainer_flag {
+                rom_file.seek(SeekFrom::Current(512))?;
+            }
+
+            let mut prgrom_buf = Vec::new();
+            prgrom_buf.resize(prgrom_size as usize, 0);
+            rom_file.read(&mut prgrom_buf)?;
+
+            Ok(prgrom_buf)
         }
 
-        let prgrom_buf = read_prgrom(
-            &mut rom_file,
-            head.prgrom_size_16k,
-            head.flag6.trainer_flag(),
-        )?;
-
-        // println!("flag6,{:#x?}", head.flag6.map_lid());
-        // println!("flag7,{:#x?}", head.flag7.map_hid());
-        // println!("{:#x?}", head);
-
-        let mut pattern_buff1k = Vec::new();
-        if head.chrrom_size_8k == 0 {
-            // 允许没有 CHR-ROM(使用 CHR-RAM 代替)
-            for _ in 0..8 {
+        fn read_chrrom(
+            rom_file: &mut File,
+            chrrom_size_8k: u8,
+        ) -> Result<Vec<Rc<RefCell<Vec<u8>>>>, Error> {
+            let mut pattern_buff1k = Vec::new();
+            for _ in 0..(chrrom_size_8k * 8) {
                 let mut chrrom_buf = Vec::new();
                 chrrom_buf.resize(1024, 0);
+                rom_file.read(&mut chrrom_buf)?;
                 pattern_buff1k.push(Rc::new(RefCell::new(chrrom_buf)));
             }
-        } else {
-            pattern_buff1k = read_chrrom(&mut rom_file, head.chrrom_size_8k)?;
+
+            Ok(pattern_buff1k)
         }
-        Ok((head, prgrom_buf, pattern_buff1k))
+
+        pub fn load_rom(
+            &mut self,
+            file_name: &String,
+        ) -> Result<(Option<&'static Vec<u8>>, Vec<Rc<RefCell<Vec<u8>>>>), error::CustomError>
+        {
+            let mut rom_file = self.read_head(file_name)?;
+            let head_id_str = std::str::from_utf8(&self.id[..])?;
+            if head_id_str != "NES\u{1a}" {
+                println!("Not support ROM type, {:?}", self.id);
+            }
+
+            let prgrom_buf = Self::read_prgrom(
+                &mut rom_file,
+                self.prgrom_size_16k,
+                self.flag6.trainer_flag(),
+            )?;
+
+            // println!("flag6,{:#x?}", head.flag6.map_lid());
+            // println!("flag7,{:#x?}", head.flag7.map_hid());
+            // println!("{:#x?}", head);
+
+            let mut pattern_buff1k: Vec<Rc<RefCell<Vec<u8>>>> = Vec::new();
+            if self.chrrom_size_8k == 0 {
+                // 允许没有 CHR-ROM(使用 CHR-RAM 代替)
+                for _ in 0..8 {
+                    let mut chrrom_buf = Vec::new();
+                    chrrom_buf.resize(1024, 0);
+                    pattern_buff1k.push(Rc::new(RefCell::new(chrrom_buf)));
+                }
+            } else {
+                pattern_buff1k = Self::read_chrrom(&mut rom_file, self.chrrom_size_8k)?;
+            }
+            let v = Box::new(prgrom_buf);
+            unsafe {
+                PRG_BUF = Some(Box::leak(v));
+                Ok((PRG_BUF, pattern_buff1k))
+            }
+        }
     }
 }

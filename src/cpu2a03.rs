@@ -26,17 +26,17 @@ pub mod memory {
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::ppu2c02::ppu;
 
-    pub struct MemMap<'a> {
+    pub struct MemMap {
         pub ram: [u8; 0x800],
         pub sram: [u8; 0x2000], // save RAM
-        pub prg_rom: [&'a [u8]; 4],
+        pub prg_rom: [&'static [u8]; 4],
         pub key: [[u8; 8]; 2],
         pub key_indx: [usize; 2],
-        bus_to_apu: &'a mut dyn Bus,
-        bus_to_ppu: &'a mut dyn Bus,
+        pub bus_to_apu: *mut dyn Bus,
+        pub bus_to_ppu: *mut dyn Bus,
     }
 
-    impl Bus for MemMap<'_> {
+    impl Bus for MemMap {
         fn read(&mut self, addr: u16) -> u8 {
             let i: usize = addr.into();
             let j: usize = i >> 13;
@@ -49,7 +49,7 @@ pub mod memory {
                     // 高三位为 0: [$0000, $2000): 系统主内存，4 次镜像
                     0 => self.ram[i & 0x7ff],
                     // 高三位为 1, [$2000, $4000): PPU 寄存器，8 字节步进镜像
-                    1 => self.bus_to_ppu.read(addr),
+                    1 => self.ppu_read(addr),
                     // 高三位为 2, [$4000, $6000): pAPU 寄存器 扩展 ROM 区
                     2 => {
                         if addr == 0x4016 {
@@ -67,7 +67,7 @@ pub mod memory {
                             }
                             val
                         } else if addr == 0x4015 {
-                            self.bus_to_apu.read(addr)
+                            self.apu_read(addr)
                         } else {
                             0
                         }
@@ -82,8 +82,9 @@ pub mod memory {
         fn write(&mut self, addr: u16, val: u8) {
             let i: usize = addr.into();
             let j: usize = i >> 13;
+            let bus_to_ppu = self.bus_to_ppu;
 
-            let mut dma_write = |addr_dma: u16| {
+            let dma_write = |addr_dma: u16| {
                 let offset: usize = (addr_dma & 0x1f00).into();
                 let base = addr_dma >> 13;
                 let src = match base {
@@ -98,7 +99,9 @@ pub mod memory {
                     }
                     _ => unreachable!("Out of memory range!"),
                 };
-                self.bus_to_ppu.dma_write(0, src, 255);
+                unsafe {
+                    (*bus_to_ppu).dma_write(0, src, 255);
+                }
                 cpu_cycles_add(513);
                 if get_cpu_cycles() & 0x1 == 0x1 {
                     cpu_cycles_add(1);
@@ -110,7 +113,7 @@ pub mod memory {
                     self.ram[i & 0x7ff] = val;
                 }
                 1 => {
-                    self.bus_to_ppu.write(addr, val);
+                    self.ppu_write(addr, val);
                 }
                 2 => {
                     if addr == 0x4014 {
@@ -122,7 +125,7 @@ pub mod memory {
                             self.key_indx[1] = 0;
                         }
                     } else if addr < 0x4020 {
-                        self.bus_to_apu.write(addr, val);
+                        self.apu_write(addr, val);
                     }
                 }
                 3 => {
@@ -146,8 +149,8 @@ pub mod memory {
         }
     }
 
-    impl MemMap<'_> {
-        pub fn new<'a>(apu: &'a mut dyn Bus, ppu: &'a mut dyn Bus) -> MemMap<'a> {
+    impl MemMap {
+        pub fn new(apu: *mut dyn Bus, ppu: *mut dyn Bus) -> MemMap {
             MemMap {
                 ram: [0; 0x800],
                 key: [[0; 8]; 2],
@@ -157,6 +160,26 @@ pub mod memory {
                 bus_to_apu: apu,
                 bus_to_ppu: ppu,
             }
+        }
+
+        fn ppu_read(&self, addr: u16) -> u8 {
+            unsafe { (*self.bus_to_ppu).read(addr) }
+        }
+
+        fn apu_read(&self, addr: u16) -> u8 {
+            unsafe { (*self.bus_to_apu).read(addr) }
+        }
+
+        fn ppu_dma_write(&mut self, addr: u16, src: &[u8], len: usize) {
+            unsafe {
+                (*self.bus_to_ppu).dma_write(addr, src, len);
+            }
+        }
+        fn apu_write(&mut self, addr: u16, val: u8) {
+            unsafe { (*self.bus_to_apu).write(addr, val) };
+        }
+        fn ppu_write(&mut self, addr: u16, val: u8) {
+            unsafe { (*self.bus_to_ppu).write(addr, val) };
         }
     }
 }
@@ -312,48 +335,38 @@ pub mod cpu {
         }
     }
 
-    pub struct Core<'a> {
+    pub struct Core {
         pub reg: Register,
         pub irq_inhibit: bool,
         pub irq_counter: u8,
         pub irq_flag: u8,
         pub irq_in_process: u8,
-        bus_to_cpu_mem: &'a mut dyn Bus,
+        pub bus_to_cpu_mem: *mut dyn Bus,
     }
 
-    impl Irq for Core<'_> {
+    impl Irq for Core {
         fn nmi_handler(&mut self) {
             let mut val_pc = self.reg.pc;
-            self.bus_to_cpu_mem
-                .push(&mut self.reg.sp, (val_pc >> 8) as u8);
-            self.bus_to_cpu_mem
-                .push(&mut self.reg.sp, (val_pc & 0xff) as u8);
-            self.bus_to_cpu_mem.push(
-                &mut self.reg.sp,
-                (self.reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
-            );
+            self.mem_push((val_pc >> 8) as u8);
+            self.mem_push((val_pc & 0xff) as u8);
+            self.mem_push((self.reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8);
             self.reg.p.set_i(true);
             self.irq_inhibit = true;
-            val_pc = self.bus_to_cpu_mem.read(NMI_VECT_ADDR) as u16;
-            val_pc |= (self.bus_to_cpu_mem.read(NMI_VECT_ADDR + 1) as u16) << 8;
+            val_pc = self.mem_read(NMI_VECT_ADDR) as u16;
+            val_pc |= (self.mem_read(NMI_VECT_ADDR + 1) as u16) << 8;
             self.reg.pc = val_pc;
             cpu_cycles_add(7);
         }
 
         fn irq_handler(&mut self) {
             let mut val_pc = self.reg.pc;
-            self.bus_to_cpu_mem
-                .push(&mut self.reg.sp, (val_pc >> 8) as u8);
-            self.bus_to_cpu_mem
-                .push(&mut self.reg.sp, (val_pc & 0xff) as u8);
-            self.bus_to_cpu_mem.push(
-                &mut self.reg.sp,
-                (self.reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8,
-            );
+            self.mem_push((val_pc >> 8) as u8);
+            self.mem_push((val_pc & 0xff) as u8);
+            self.mem_push((self.reg.p.0 | ProcessorStatusFlags::FLAG_R.bits()) as u8);
             self.reg.p.set_i(true);
             self.irq_inhibit = true;
-            val_pc = self.bus_to_cpu_mem.read(IRQ_VECT_ADDR) as u16;
-            val_pc |= (self.bus_to_cpu_mem.read(IRQ_VECT_ADDR + 1) as u16) << 8;
+            val_pc = self.mem_read(IRQ_VECT_ADDR) as u16;
+            val_pc |= (self.mem_read(IRQ_VECT_ADDR + 1) as u16) << 8;
             self.reg.pc = val_pc;
             cpu_cycles_add(7);
         }
@@ -372,8 +385,8 @@ pub mod cpu {
         }
     }
 
-    impl Core<'_> {
-        pub fn new<'a>(mem: &'a mut dyn Bus) -> Core<'a> {
+    impl Core {
+        pub fn new<'a>(mem: *mut dyn Bus) -> Core {
             Core {
                 reg: Register::new(),
                 irq_inhibit: false,
@@ -383,11 +396,20 @@ pub mod cpu {
                 bus_to_cpu_mem: mem,
             }
         }
+        fn mem_read(&mut self, addr: u16) -> u8 {
+            unsafe { (*self.bus_to_cpu_mem).read(addr) }
+        }
+        fn mem_push(&mut self, data: u8) {
+            unsafe {
+                (*self.bus_to_cpu_mem).push(&mut self.reg.sp, data);
+            }
+        }
+
         pub fn reset(&mut self) {
-            self.reg.reset(
-                self.bus_to_cpu_mem.read(REST_VECT_ADDR),
-                self.bus_to_cpu_mem.read(REST_VECT_ADDR + 1),
-            );
+            let pcl = self.mem_read(REST_VECT_ADDR);
+            let pch = self.mem_read(REST_VECT_ADDR + 1);
+
+            self.reg.reset(pcl, pch);
             self.irq_inhibit = false;
             self.irq_counter = 0;
             self.irq_flag = 0;
@@ -1823,7 +1845,7 @@ pub mod apu {
         }
     }
 
-    pub struct Apu<'a> {
+    pub struct Apu {
         reg: Register,
         set_wave_reg_func_tbl: [fn(&mut Apu, u8); 24],
         cpu_clock_hz: u32,
@@ -1834,8 +1856,8 @@ pub mod apu {
         dmc: DmcDev,
         tv_system: u8,
         frame_int_flag: bool,
-        irq: Rc<RefCell<&'a mut dyn Irq>>,
-        bus_to_cpu_mem: Rc<RefCell<&'a mut dyn Bus>>,
+        pub irq: *mut dyn Irq,
+        pub bus_to_cpu_mem: *mut dyn Bus,
     }
     fn set_reg_nop(_: &mut Apu, _: u8) {}
     fn set_psulse_0(apu_dev: &mut Apu, val: u8) {
@@ -1997,12 +2019,11 @@ pub mod apu {
         }
     }
 
-    impl Bus for Apu<'_> {
+    impl Bus for Apu {
         fn read(&mut self, _addr: u16) -> u8 {
             let mut val = 0_u8;
-            let mut irq = *self.irq.borrow_mut();
 
-            irq.irq_ack();
+            self.irq_ack();
 
             if self.pulse[0].length_counter != 0 {
                 val.set_bit(0, true);
@@ -2035,15 +2056,15 @@ pub mod apu {
         }
     }
 
-    impl Apu<'_> {
+    impl Apu {
         // tv_system: 0 NTSC, 1 PAL
-        pub fn new<'a>(
+        pub fn new(
             cpu_clock_hz: u32,
             sample_rate: u32,
             tv_system: u8,
-            irq: &'a mut dyn Irq,
-            mem_bus: &'a mut dyn Bus,
-        ) -> Apu<'a> {
+            irq: *mut dyn Irq,
+            mem_bus: *mut dyn Bus,
+        ) -> Apu {
             Apu {
                 reg: Default::default(),
                 #[rustfmt::skip]
@@ -2066,11 +2087,26 @@ pub mod apu {
                 dmc: DmcDev::new(cpu_clock_hz, sample_rate),
                 tv_system,
                 frame_int_flag: false,
-                irq:Rc::new(RefCell::new(irq)),
-                bus_to_cpu_mem:Rc::new(RefCell::new( mem_bus)),
+                irq,
+                bus_to_cpu_mem: mem_bus,
             }
         }
 
+        fn cpu_mem_read(&mut self, addr: u16) -> u8 {
+            unsafe { (*self.bus_to_cpu_mem).read(addr) }
+        }
+
+        fn irq_ack(&mut self) {
+            unsafe {
+                (*self.irq).irq_ack();
+            }
+        }
+
+        fn irq_req(&mut self) {
+            unsafe {
+                (*self.irq).irq_req();
+            }
+        }
         /*********************** Pulse channel **************************
                           Sweep -----> Timer
                             |            |
@@ -2313,10 +2349,10 @@ pub mod apu {
         fn trig_dmc_timer(&mut self, cpu_ticks: u32) {
             let dmc = &mut self.dmc;
             let apu_reg: &Register = &self.reg;
+            let mem_bus = self.bus_to_cpu_mem;
 
             let blip = &mut dmc.blip;
             let period = dmc.freq_div.period as u32;
-            let bus_to_cpu_mem = *self.bus_to_cpu_mem.borrow();
 
             //timer
             dmc.freq_div.count(cpu_ticks, |_, n| {
@@ -2327,7 +2363,7 @@ pub mod apu {
                         if dmc.bit_indx == 8 {
                             if dmc.sample_length != 0 {
                                 //read data from prgrom
-                                dmc.load_data = bus_to_cpu_mem.read(dmc.sample_address);
+                                dmc.load_data = unsafe { (*mem_bus).read(dmc.sample_address) };
                                 // TODO: spend cpu cycles
                                 //The address is incremented; if it exceeds $FFFF, it is wrapped around to $8000.
                                 dmc.sample_address = dmc.sample_address.saturating_add(1) | 0x8000;
@@ -2370,7 +2406,6 @@ pub mod apu {
         #[inline]
         fn frame_counter_trig_mode0(&mut self) {
             let cpu_now_cycles = get_cpu_cycles();
-            let mut irq = *self.irq.borrow_mut();
 
             if (self.frame_counter & 0x1) == 0x1 {
                 self.trig_pulse_length(0);
@@ -2383,7 +2418,7 @@ pub mod apu {
                 //IRQ
                 if self.reg.frame_counter_ctrl.irq_inhibit_flag() == false {
                     self.frame_int_flag = true;
-                    irq.irq_req();
+                    self.irq_req();
                 }
             }
             self.trig_pulse_envelope(0);
