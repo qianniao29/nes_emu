@@ -2,7 +2,6 @@
 
 pub mod ppu {
     use crate::common::{Bus, Irq};
-    use ahash::AHashMap;
     use std::cell::RefCell;
     use std::default;
     use std::rc::Rc;

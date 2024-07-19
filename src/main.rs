@@ -12,10 +12,10 @@ mod ppu2c02;
 mod rom_fs;
 mod sound;
 
-use ahash::AHashMap;
 use std::{
     cell::RefCell,
     env,
+    ptr::addr_of_mut,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -28,7 +28,10 @@ use input::input::InputFunc;
 use input::input_sdl2::input_sdl2;
 use ppu2c02::ppu;
 use rom_fs::rom::{self, RomHead};
-use sound::sound_base::snd_base;
+use sound::{
+    snd_base::{self, SndFunc},
+    snd_cpal::snd_cpal,
+};
 
 struct DummyBus;
 impl Bus for DummyBus {}
@@ -45,24 +48,26 @@ struct Soc {
 }
 
 impl Soc {
-    pub fn new() -> Self {
+    pub fn new(sample_rate: u32) -> Self {
         Self {
-            cpu: cpu::Core::new(unsafe { &mut DUMMY }),
-            ppu: ppu::Ppu::new(unsafe { &mut DUMMY }),
+            cpu: cpu::Core::new(unsafe { addr_of_mut!(DUMMY) }),
+            ppu: ppu::Ppu::new(unsafe { addr_of_mut!(DUMMY) }),
             apu: apu::Apu::new(
                 disp::NTSC.cpu_clock_hz,
-                disp::NTSC.cpu_clock_hz,
+                sample_rate,
                 disp::TV_SYSTEM_NTSC,
-                unsafe { &mut DUMMY },
-                unsafe { &mut DUMMY },
+                unsafe { addr_of_mut!(DUMMY) },
+                unsafe { addr_of_mut!(DUMMY) },
             ),
-            mem: memory::MemMap::new(unsafe { &mut DUMMY }, unsafe { &mut DUMMY }),
+            mem: memory::MemMap::new(unsafe { addr_of_mut!(DUMMY) }, unsafe {
+                addr_of_mut!(DUMMY)
+            }),
             rom_head: Default::default(),
         }
     }
 
     pub fn init(&mut self, rom_file_name: &String) {
-        /*------------------------------ROM init--------------------------------------------*/
+        /*------------------------------ROM init-------------------------------------------*/
         let (prg_buf, pattern_buff1k) = match self.rom_head.load_rom(rom_file_name) {
             Ok((prg, pat)) => (prg, pat),
             Err(error) => {
@@ -74,9 +79,14 @@ impl Soc {
             None => panic!("load_rom error!"),
         };
         // println!("head:{:#?}",head);
-        /*------------------------------------------------------------------------------------*/
+        assert_eq!(
+            self.rom_head.timing,
+            disp::TV_SYSTEM_NTSC,
+            "Just support NTSC system!!!"
+        );
+        /*-------------------------------------^---------------------------------------------*/
 
-        /*------------------------------cpu memory init--------------------------------------------*/
+        /*------------------------------cpu memory init--------------------------------------*/
         let mut offset = 0;
         if self.rom_head.prgrom_size_16k > 1 {
             offset = 0x4000;
@@ -89,14 +99,14 @@ impl Soc {
         ];
         self.mem.bus_to_apu = &mut self.apu;
         self.mem.bus_to_ppu = &mut self.ppu;
-        /*------------------------------------------------------------------------------------*/
+        /*-------------------------------------^----------------------------------------------*/
 
-        /*------------------------------cpu Register init--------------------------------------------*/
+        /*------------------------------cpu Register init-------------------------------------*/
         self.cpu.bus_to_cpu_mem = &mut self.mem;
-        reset(&mut self.cpu);
-        /*------------------------------------------------------------------------------------*/
+        self.cpu.reset();
+        /*-------------------------------------^----------------------------------------------*/
 
-        /*------------------------------PPU init--------------------------------------------*/
+        /*--------------------------------PPU init--------------------------------------------*/
         for i in 0..8 {
             self.ppu.mem.bank[i] = pattern_buff1k[i].clone();
         }
@@ -105,45 +115,38 @@ impl Soc {
             self.rom_head.flag6.mirror_flag(),
         );
         self.ppu.irq = &mut self.cpu;
-        /*------------------------------------------------------------------------------------*/
+        /*-----------------------------------^------------------------------------------------*/
 
-        /*------------------------------APU init--------------------------------------------*/
+        /*--------------------------------APU init--------------------------------------------*/
         self.apu.irq = &mut self.cpu;
         self.apu.bus_to_cpu_mem = &mut self.mem;
-        /*------------------------------------------------------------------------------------*/
+        /*-----------------------------------^------------------------------------------------*/
     }
-}
-
-#[inline(always)]
-fn reset(cpu: &mut cpu::Core) {
-    cpu.reset();
 }
 
 fn main() -> Result<(), error::CustomError> {
     let args: Vec<String> = env::args().collect();
     let file_name = &args[1];
     println!("File name: {}.", file_name);
-    let dis_std = disp::NTSC;
-
-    let mut soc = Soc::new();
-    soc.init(file_name);
 
     /*------------------------------display init------------------------------------------*/
+    let dis_std = disp::NTSC;
     let mut disp = disp_sdl2::DispSDL2::new();
-    assert_eq!(
-        soc.rom_head.timing,
-        disp::TV_SYSTEM_NTSC,
-        "Just support NTSC system!!!"
-    );
-    /*------------------------------------------------------------------------------------*/
+    /*-----------------------------------^------------------------------------------------*/
 
     /*------------------------------input init--------------------------------------------*/
     let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
-    /*------------------------------------------------------------------------------------*/
+    /*-----------------------------------^------------------------------------------------*/
 
     /*------------------------------sound init--------------------------------------------*/
-    // let sound = ;
-    /*------------------------------------------------------------------------------------*/
+    let mut sound = snd_base::Snd::new();
+    sound.init();
+    /*-----------------------------------^------------------------------------------------*/
+
+    /*--------------------------------soc init--------------------------------------------*/
+    let mut soc = Soc::new(sound.sample_rate);
+    soc.init(file_name);
+    /*-----------------------------------^------------------------------------------------*/
 
     let mut cpu_cycles_end;
     let mut master_cycles: u32;
@@ -198,7 +201,7 @@ fn main() -> Result<(), error::CustomError> {
             /* all 262 line trigger 4 times, so trigger per 65 line. */
             if j == 65 || j == 130 || j == 195 {
                 // APU frame counter trigger
-                //    mem.apu_mem.frame_counter_trig(&mut mem);
+                soc.apu.frame_counter_trig();
             }
 
             //dot 256, 257
