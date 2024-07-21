@@ -1869,6 +1869,7 @@ pub mod apu {
         dmc: DmcDev,
         tv_system: u8,
         frame_int_flag: bool,
+        pcm_buf: [f32;20480],
         pub irq: *mut dyn Irq,
         pub bus_to_cpu_mem: *mut dyn Bus,
     }
@@ -2100,6 +2101,7 @@ pub mod apu {
                 dmc: DmcDev::new(cpu_clock_hz, sample_rate),
                 tv_system,
                 frame_int_flag: false,
+                pcm_buf: [0_f32;20480],
                 irq,
                 bus_to_cpu_mem: mem_bus,
             }
@@ -2424,6 +2426,51 @@ pub mod apu {
             });
         }
 
+        /**************************************************************************
+            output = pulse_out + tnd_out
+
+                            95.88
+            pulse_out = ------------------------------------
+                        (8128 / (pulse1 + pulse2)) + 100
+
+                                                159.79
+            tnd_out = -------------------------------------------------------------
+                                                 1
+                      ----------------------------------------------------- + 100
+                          (triangle / 8227) + (noise / 12241) + (dmc / 22638)
+        */
+        fn mix(&mut self)
+        {
+            let blip_len = [
+                self.pulse[0].blip.buffer.samples_avail(),
+                self.pulse[1].blip.buffer.samples_avail(),
+                self.triangle.blip.buffer.samples_avail(),
+                self.noise.blip.buffer.samples_avail(),
+                self.dmc.blip.buffer.samples_avail(),
+            ];
+            // println!(
+            //     "mode1: pulse0 blip:{},pulse1 blip:{},triangle blip:{},noise blip:{},dmc blip:{},",
+            //     blip_len[0], blip_len[1], blip_len[2], blip_len[3], blip_len[4]
+            // );
+            let mut len = 0;
+            let mut min = std::u32::MAX;
+            for v in blip_len.iter() {
+                if *v != 0{
+                    min = min.min(*v);
+                    len = min;
+                }
+            };
+            // println!("len={:?}", len);
+            let mut buf: Vec<i16> = Vec::new();
+            buf.resize(len as usize, 0);
+            let _cnt = self.pulse[0].blip.buffer.read_samples(&mut buf, false);
+            // println!("cnt={:?}", cnt);
+            self.pulse[1].blip.buffer.read_samples(&mut buf, false);
+            self.triangle.blip.buffer.read_samples(&mut buf, false);
+            self.noise.blip.buffer.read_samples(&mut buf, false);
+            self.dmc.blip.buffer.read_samples(&mut buf, false);
+        }
+ 
         /*  mode 0:    mode 1:       function
             ---------  -----------  -----------------------------
             - - - f    - - - - -    IRQ (if bit 6 is clear)
@@ -2458,15 +2505,6 @@ pub mod apu {
             self.trig_noise_timer(cpu_now_cycles);
             self.trig_dmc_timer(cpu_now_cycles);
 
-            println!(
-                "mode0: pulse0 blip:{},pulse1 blip:{},triangle blip:{},noise blip:{},dmc blip:{},",
-                self.pulse[0].blip.buffer.samples_avail(),
-                self.pulse[1].blip.buffer.samples_avail(),
-                self.triangle.blip.buffer.samples_avail(),
-                self.noise.blip.buffer.samples_avail(),
-                self.dmc.blip.buffer.samples_avail()
-            );
-
             self.frame_counter = (self.frame_counter + 1) & 0x3;
         }
         #[inline]
@@ -2492,35 +2530,6 @@ pub mod apu {
             self.trig_noise_timer(cpu_now_cycles);
             self.trig_dmc_timer(cpu_now_cycles);
 
-            let blip_len = [
-                self.pulse[0].blip.buffer.samples_avail(),
-                self.pulse[1].blip.buffer.samples_avail(),
-                self.triangle.blip.buffer.samples_avail(),
-                self.noise.blip.buffer.samples_avail(),
-                self.dmc.blip.buffer.samples_avail(),
-            ];
-            println!(
-                "mode1: pulse0 blip:{},pulse1 blip:{},triangle blip:{},noise blip:{},dmc blip:{},",
-                blip_len[0], blip_len[1], blip_len[2], blip_len[3], blip_len[4]
-            );
-            let mut len = 0;
-            let mut min = std::u32::MAX;
-            for v in blip_len.iter() {
-                if *v != 0{
-                    min = min.min(*v);
-                    len = min;
-                }
-            };
-            println!("len={:?}", len);
-            let mut buf: Vec<i16> = Vec::new();
-            buf.resize(len as usize, 0);
-            let cnt = self.pulse[0].blip.buffer.read_samples(&mut buf, false);
-            println!("cnt={:?}", cnt);
-            self.pulse[1].blip.buffer.read_samples(&mut buf, false);
-            self.triangle.blip.buffer.read_samples(&mut buf, false);
-            self.noise.blip.buffer.read_samples(&mut buf, false);
-            self.dmc.blip.buffer.read_samples(&mut buf, false);
-
             self.frame_counter += 1;
             if self.frame_counter > 4 {
                 self.frame_counter = 0;
@@ -2538,6 +2547,8 @@ pub mod apu {
             } else {
                 self.frame_counter_trig_mode0();
             }
+
+            self.mix();
         }
     }
 
