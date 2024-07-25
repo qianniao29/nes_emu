@@ -42,15 +42,15 @@ pub mod memory {
             let j: usize = i >> 13;
 
             if addr & 0x8000 == 0x8000 {
-                // 高一位为 1, [$8000, $10000) 程序 PRG-ROM 区
+                // 高一位为 1, [$8000, $ffff) 程序 PRG-ROM 区
                 self.prg_rom[j & 3][i & 0x1fff]
             } else {
                 match j {
-                    // 高三位为 0: [$0000, $2000): 系统主内存，4 次镜像
+                    // 高三位为 0: [$0000, $1fff): 系统主内存，4 次镜像
                     0 => self.ram[i & 0x7ff],
-                    // 高三位为 1, [$2000, $4000): PPU 寄存器，8 字节步进镜像
+                    // 高三位为 1, [$2000, $3fff): PPU 寄存器，8 字节步进镜像
                     1 => self.ppu_read(addr),
-                    // 高三位为 2, [$4000, $6000): pAPU 寄存器 扩展 ROM 区
+                    // 高三位为 2, [$4000, $5fff): pAPU 寄存器 扩展 ROM 区
                     2 => {
                         if addr == 0x4016 {
                             let val = self.key[0][self.key_indx[0]];
@@ -72,7 +72,7 @@ pub mod memory {
                             0
                         }
                     }
-                    // 高三位为 3, [$6000, $8000): 存档 SRAM 区
+                    // 高三位为 3, [$6000, $7fff): 存档 SRAM 区
                     3 => self.sram[i & 0x1fff],
                     _ => unreachable!("Out of memory range!"),
                 }
@@ -1557,7 +1557,6 @@ pub mod apu {
     use std::rc::Rc;
 
     use bitfield::{Bit, BitMut};
-    use blip_buf::BlipBuf;
 
     use crate::common::{Bus, Irq};
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
@@ -1731,32 +1730,39 @@ pub mod apu {
     }
 
     struct BlipData {
-        buffer: BlipBuf,
+        period: f32,
+        buffer: Vec<u8>,
         tick: u32,
-        ampl: i32,
+        ampl: u8,
     }
 
     impl BlipData {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
-            let mut blip_buffer = BlipBuf::new(sample_rate);
-            blip_buffer.set_rates(f64::from(cpu_clock_hz), f64::from(sample_rate));
-
             BlipData {
-                buffer: blip_buffer,
+                period: cpu_clock_hz as f32 / sample_rate as f32,
+                buffer: Vec::new(),
                 tick: 0,
                 ampl: 0,
             }
         }
 
-        fn fill(&mut self, tick: u32, ampl: i32) {
-            self.tick = tick;
-            self.buffer.add_delta(tick, ampl - self.ampl);
+        fn fill(&mut self, tick: u32, ampl: u8) {
+            assert!(tick >= self.tick, "tick shouldn't less than self.tick!!!");
+            let count = ((tick as f32 / self.period) as usize).wrapping_sub(self.buffer.len());
+
+            for _ in 0..count {
+                self.buffer.push(self.ampl);
+            }
             self.ampl = ampl;
+            self.tick = tick;
         }
 
-        fn end(&mut self, tick: u32) {
-            self.buffer.end_frame(tick);
-            self.tick = 0;
+        fn read_samples(&mut self, buf: &mut [u8]) -> usize {
+            let len = buf.len().min(self.buffer.len());
+            let d = self.buffer.drain(0..len);
+            buf[..len].copy_from_slice(d.as_slice());
+            self.tick = (self.tick as f32 - self.period * len as f32) as u32;
+            len
         }
     }
 
@@ -1768,7 +1774,6 @@ pub mod apu {
         volume: u8,
         blip: BlipData,
         seque_id: u8,
-        mute: bool,
     }
     impl PulseDev {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
@@ -1780,7 +1785,6 @@ pub mod apu {
                 volume: 0,
                 blip: BlipData::new(cpu_clock_hz, sample_rate),
                 seque_id: 0,
-                mute: false,
             }
         }
     }
@@ -1792,7 +1796,6 @@ pub mod apu {
         line_cnt_reload_flag: bool,
         blip: BlipData,
         seque_id: u8,
-        mute: bool,
     }
     impl TriangleDev {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
@@ -1803,7 +1806,6 @@ pub mod apu {
                 line_cnt_reload_flag: false,
                 blip: BlipData::new(cpu_clock_hz, sample_rate),
                 seque_id: 0,
-                mute: false,
             }
         }
     }
@@ -1815,7 +1817,6 @@ pub mod apu {
         blip: BlipData,
         volume: u8,
         shift: u16,
-        mute: bool,
     }
     impl NoiseDev {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
@@ -1826,7 +1827,6 @@ pub mod apu {
                 blip: BlipData::new(cpu_clock_hz, sample_rate),
                 volume: 0,
                 shift: 1,
-                mute: false,
             }
         }
     }
@@ -1840,7 +1840,6 @@ pub mod apu {
         sample_length: u16,
         bit_indx: u8,
         int_flag: bool,
-        mute: bool,
     }
     impl DmcDev {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
@@ -1853,7 +1852,6 @@ pub mod apu {
                 sample_length: 0,
                 bit_indx: 8,
                 int_flag: false,
-                mute: false,
             }
         }
     }
@@ -1869,14 +1867,14 @@ pub mod apu {
         dmc: DmcDev,
         tv_system: u8,
         frame_int_flag: bool,
-        pcm_buf: [f32;20480],
+        last_cpu_tick: u32,
         pub irq: *mut dyn Irq,
         pub bus_to_cpu_mem: *mut dyn Bus,
     }
     fn set_reg_nop(_: &mut Apu, _: u8) {}
     fn set_psulse_0(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[0].envelope.0 = val;
-        if apu_dev.reg.pulse[0].envelope.constant_volume() {
+        if apu_dev.reg.pulse[0].envelope.constant_volume() == false {
             apu_dev.pulse[0].evelope_div.period = apu_dev.reg.pulse[0].envelope.volume() as u16 + 1;
             apu_dev.pulse[0].evelope_div.counter = apu_dev.pulse[0].evelope_div.period;
         } else {
@@ -1906,7 +1904,7 @@ pub mod apu {
     }
     fn set_psulse_4(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[1].envelope.0 = val;
-        if apu_dev.reg.pulse[1].envelope.constant_volume() {
+        if apu_dev.reg.pulse[1].envelope.constant_volume() == false {
             apu_dev.pulse[1].evelope_div.period = apu_dev.reg.pulse[1].envelope.volume() as u16 + 1;
             apu_dev.pulse[1].evelope_div.counter = apu_dev.pulse[1].evelope_div.period;
         } else {
@@ -1953,7 +1951,7 @@ pub mod apu {
     }
     fn set_noise_12(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.noise.envelope.0 = val;
-        if apu_dev.reg.noise.envelope.constant_volume() {
+        if apu_dev.reg.noise.envelope.constant_volume() == false {
             apu_dev.noise.evelope_div.period = apu_dev.reg.noise.envelope.volume() as u16 + 1;
             apu_dev.noise.evelope_div.counter = apu_dev.noise.evelope_div.period;
         } else {
@@ -2101,7 +2099,7 @@ pub mod apu {
                 dmc: DmcDev::new(cpu_clock_hz, sample_rate),
                 tv_system,
                 frame_int_flag: false,
-                pcm_buf: [0_f32;20480],
+                last_cpu_tick: 0,
                 irq,
                 bus_to_cpu_mem: mem_bus,
             }
@@ -2198,29 +2196,23 @@ pub mod apu {
                 || (pulse.freq_div.period < 8)
                 || (pulse.freq_div.period > 0x7ff)
             {
-                pulse.mute = true;
                 return;
-            } else {
-                pulse.mute = false;
             }
-            println!("cpu_ticks={}", cpu_ticks);
+
             let blip = &mut pulse.blip;
             let period = pulse.freq_div.period as u32;
-            let vl = pulse.volume as i32;
+            let vl = pulse.volume;
             let seque_id = &mut pulse.seque_id;
             let duty_id = apu_reg.pulse[pulse_id].envelope.duty() as usize;
             //timer
             pulse.freq_div.count(cpu_ticks / 2, |_, n| {
-                println!("blip.tick={},period={},n={}", blip.tick, period, n);
-
                 for _ in 0..n {
                     blip.fill(
                         blip.tick + 2 * period,
-                        PULSE_SEQUENCE_DUTY_TBL[duty_id][*seque_id as usize] as i32 * vl,
+                        PULSE_SEQUENCE_DUTY_TBL[duty_id][*seque_id as usize] * vl,
                     );
                     *seque_id = (*seque_id + 1) & 0x7;
                 }
-                blip.end(blip.tick + 2 * n * period);
             });
         }
 
@@ -2270,10 +2262,7 @@ pub mod apu {
                 || (triangle.freq_div.period <= 2)
                 || (triangle.freq_div.period > 0x7ff)
             {
-                triangle.mute = true;
                 return;
-            } else {
-                triangle.mute = false;
             }
 
             let blip = &mut triangle.blip;
@@ -2284,11 +2273,10 @@ pub mod apu {
                 for _ in 0..n {
                     blip.fill(
                         blip.tick + period,
-                        TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize] as i32,
+                        TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize],
                     );
                     triangle.seque_id = (triangle.seque_id + 1) & 0x1f;
                 }
-                blip.end(blip.tick + n * period);
             });
         }
 
@@ -2334,15 +2322,12 @@ pub mod apu {
             let noise = &mut self.noise;
             let apu_reg: &Register = &self.reg;
             if (apu_reg.sta_ctrl.triangle_en() == false) || (noise.length_counter == 0) {
-                noise.mute = true;
                 return;
-            } else {
-                noise.mute = false;
             }
 
             let blip = &mut noise.blip;
             let period = noise.freq_div.period as u32;
-            let vl = noise.volume as i32;
+            let vl = noise.volume;
 
             //timer
             noise.freq_div.count(cpu_ticks, |_, n| {
@@ -2357,7 +2342,6 @@ pub mod apu {
                     let ampl = if noise.shift & 0x1 == 0 { 1 } else { 0 } * vl;
                     blip.fill(blip.tick + period, ampl);
                 }
-                blip.end(blip.tick + n * period);
             });
         }
 
@@ -2371,10 +2355,7 @@ pub mod apu {
         fn trig_dmc_timer(&mut self, cpu_ticks: u32) {
             let dmc = &mut self.dmc;
             if dmc.freq_div.period == 0 {
-                dmc.mute = true;
                 return;
-            } else {
-                dmc.mute = false;
             }
 
             let apu_reg: &Register = &self.reg;
@@ -2418,11 +2399,10 @@ pub mod apu {
                             dmc.dac_value = dmc.dac_value.saturating_sub(2);
                         }
                         dmc.bit_indx += 1;
-                        ampl = dmc.dac_value as i32;
+                        ampl = dmc.dac_value;
                     }
                     blip.fill(blip.tick + period, ampl);
                 }
-                blip.end(blip.tick + n * period);
             });
         }
 
@@ -2439,38 +2419,81 @@ pub mod apu {
                       ----------------------------------------------------- + 100
                           (triangle / 8227) + (noise / 12241) + (dmc / 22638)
         */
-        fn mix(&mut self)
-        {
+        pub fn mix(&mut self, sample_buf: &mut Vec<f32>) {
             let blip_len = [
-                self.pulse[0].blip.buffer.samples_avail(),
-                self.pulse[1].blip.buffer.samples_avail(),
-                self.triangle.blip.buffer.samples_avail(),
-                self.noise.blip.buffer.samples_avail(),
-                self.dmc.blip.buffer.samples_avail(),
+                self.pulse[0].blip.buffer.len(),
+                self.pulse[1].blip.buffer.len(),
+                self.triangle.blip.buffer.len(),
+                self.noise.blip.buffer.len(),
+                self.dmc.blip.buffer.len(),
             ];
+            if blip_len == [0, 0, 0, 0, 0] {
+                return;
+            }
             // println!(
             //     "mode1: pulse0 blip:{},pulse1 blip:{},triangle blip:{},noise blip:{},dmc blip:{},",
             //     blip_len[0], blip_len[1], blip_len[2], blip_len[3], blip_len[4]
             // );
-            let mut len = 0;
-            let mut min = std::u32::MAX;
+            let mut len: usize = std::usize::MAX;
             for v in blip_len.iter() {
-                if *v != 0{
-                    min = min.min(*v);
-                    len = min;
+                if *v != 0 {
+                    len = len.min(*v);
                 }
-            };
-            // println!("len={:?}", len);
-            let mut buf: Vec<i16> = Vec::new();
-            buf.resize(len as usize, 0);
-            let _cnt = self.pulse[0].blip.buffer.read_samples(&mut buf, false);
-            // println!("cnt={:?}", cnt);
-            self.pulse[1].blip.buffer.read_samples(&mut buf, false);
-            self.triangle.blip.buffer.read_samples(&mut buf, false);
-            self.noise.blip.buffer.read_samples(&mut buf, false);
-            self.dmc.blip.buffer.read_samples(&mut buf, false);
+            }
+
+            let mut buf: Vec<u8> = Vec::new();
+            let mut tnd_out: Vec<f32> = Vec::new();
+            let indx = sample_buf.len();
+            // println!("len={},indx={:?}", len, indx);
+            buf.resize(len, 0);
+            tnd_out.resize(len, 0_f32);
+
+            let mut cnt = self.pulse[0].blip.read_samples(&mut buf);
+            if cnt == len {
+                for i in 0..len {
+                    sample_buf.push(buf[i] as f32);
+                }
+            } else {
+                for _ in 0..len {
+                    sample_buf.push(0_f32);
+                }
+            }
+
+            cnt = self.pulse[1].blip.read_samples(&mut buf);
+            if cnt == len {
+                for i in 0..len {
+                    sample_buf[indx + i] =
+                        95.88 / (8128.0 / (sample_buf[indx + i] + buf[i] as f32) + 100.0);
+                }
+            } else {
+                for i in 0..len {
+                    sample_buf[indx + i] = 95.88 / (8128.0 / sample_buf[indx + i] + 100.0);
+                }
+            }
+
+            cnt = self.triangle.blip.read_samples(&mut buf);
+            for i in 0..cnt {
+                tnd_out[i] = buf[i] as f32 / 8227.0;
+            }
+            cnt = self.noise.blip.read_samples(&mut buf);
+            for i in 0..cnt {
+                tnd_out[i] = tnd_out[i] + buf[i] as f32 / 12241.0;
+            }
+            cnt = self.dmc.blip.read_samples(&mut buf);
+            if cnt == len {
+                for i in 0..len {
+                    tnd_out[i] = 159.79 / (1.0 / (tnd_out[i] + buf[i] as f32 / 22638.0) + 100.0);
+                    sample_buf[indx + i] += tnd_out[i];
+                }
+            } else {
+                for i in 0..len {
+                    tnd_out[i] = 159.79 / (1.0 / tnd_out[i] + 100.0);
+                    sample_buf[indx + i] += tnd_out[i];
+                }
+            }
+            // println!("len={},sample_buf={:?}", sample_buf.len(), sample_buf);
         }
- 
+
         /*  mode 0:    mode 1:       function
             ---------  -----------  -----------------------------
             - - - f    - - - - -    IRQ (if bit 6 is clear)
@@ -2479,7 +2502,13 @@ pub mod apu {
         */
         #[inline]
         fn frame_counter_trig_mode0(&mut self) {
-            let cpu_now_cycles = get_cpu_cycles();
+            let mut cpu_cycles = get_cpu_cycles();
+            cpu_cycles = if self.last_cpu_tick > cpu_cycles {
+                cpu_cycles
+            } else {
+                cpu_cycles - self.last_cpu_tick
+            };
+            self.last_cpu_tick = cpu_cycles;
 
             if (self.frame_counter & 0x1) == 0x1 {
                 self.trig_pulse_length(0);
@@ -2499,11 +2528,11 @@ pub mod apu {
             self.trig_pulse_envelope(1);
             self.trig_triangle_line();
 
-            self.trig_pulse_timer(0, cpu_now_cycles);
-            self.trig_pulse_timer(1, cpu_now_cycles);
-            self.trig_triangle_timer(cpu_now_cycles);
-            self.trig_noise_timer(cpu_now_cycles);
-            self.trig_dmc_timer(cpu_now_cycles);
+            self.trig_pulse_timer(0, cpu_cycles);
+            self.trig_pulse_timer(1, cpu_cycles);
+            self.trig_triangle_timer(cpu_cycles);
+            self.trig_noise_timer(cpu_cycles);
+            self.trig_dmc_timer(cpu_cycles);
 
             self.frame_counter = (self.frame_counter + 1) & 0x3;
         }
@@ -2547,8 +2576,6 @@ pub mod apu {
             } else {
                 self.frame_counter_trig_mode0();
             }
-
-            self.mix();
         }
     }
 

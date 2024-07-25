@@ -202,6 +202,7 @@ fn main() -> Result<(), error::CustomError> {
             if j == 65 || j == 130 || j == 195 {
                 // APU frame counter trigger
                 soc.apu.frame_counter_trig();
+                soc.apu.mix(&mut sound.dev.buffer.lock().unwrap());
             }
 
             //dot 256, 257
