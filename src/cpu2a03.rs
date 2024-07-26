@@ -1759,6 +1759,9 @@ pub mod apu {
 
         fn read_samples(&mut self, buf: &mut [u8]) -> usize {
             let len = buf.len().min(self.buffer.len());
+            if len == 0 {
+                return 0;
+            }
             let d = self.buffer.drain(0..len);
             buf[..len].copy_from_slice(d.as_slice());
             self.tick = (self.tick as f32 - self.period * len as f32) as u32;
@@ -2430,10 +2433,7 @@ pub mod apu {
             if blip_len == [0, 0, 0, 0, 0] {
                 return;
             }
-            // println!(
-            //     "mode1: pulse0 blip:{},pulse1 blip:{},triangle blip:{},noise blip:{},dmc blip:{},",
-            //     blip_len[0], blip_len[1], blip_len[2], blip_len[3], blip_len[4]
-            // );
+
             let mut len: usize = std::usize::MAX;
             for v in blip_len.iter() {
                 if *v != 0 {
@@ -2441,57 +2441,119 @@ pub mod apu {
                 }
             }
 
-            let mut buf: Vec<u8> = Vec::new();
-            let mut tnd_out: Vec<f32> = Vec::new();
+            let mut buf1: Vec<u8> = Vec::new();
+            let mut buf2: Vec<u8> = Vec::new();
             let indx = sample_buf.len();
             // println!("len={},indx={:?}", len, indx);
-            buf.resize(len, 0);
-            tnd_out.resize(len, 0_f32);
+            /************************ pulse out **************************/
+            buf1.resize(len, 0);
+            buf2.resize(len, 0);
 
-            let mut cnt = self.pulse[0].blip.read_samples(&mut buf);
-            if cnt == len {
-                for i in 0..len {
-                    sample_buf.push(buf[i] as f32);
-                }
-            } else {
-                for _ in 0..len {
-                    sample_buf.push(0_f32);
-                }
+            self.pulse[0].blip.read_samples(&mut buf1);
+            self.pulse[1].blip.read_samples(&mut buf2);
+            for i in 0..len {
+                // f32 divisor can be 0.
+                sample_buf.push(95.88 / (8128.0 / (buf1[i] + buf2[i]) as f32 + 100.0));
             }
 
-            cnt = self.pulse[1].blip.read_samples(&mut buf);
-            if cnt == len {
+            /************************ tnd out **************************/
+            let mut buf3: Vec<u8> = Vec::new();
+            buf3.resize(len, 0);
+            self.dmc.blip.read_samples(&mut buf3);
+            if blip_len[2] != 0 && blip_len[3] != 0 {
+                self.triangle.blip.read_samples(&mut buf1);
+                self.noise.blip.read_samples(&mut buf2);
                 for i in 0..len {
-                    sample_buf[indx + i] =
-                        95.88 / (8128.0 / (sample_buf[indx + i] + buf[i] as f32) + 100.0);
+                    let tnd_out = 159.79
+                        / (1.0
+                            / (buf1[i] as f32 / 8227.0
+                                + buf2[i] as f32 / 12241.0
+                                + buf3[i] as f32 / 22638.0)
+                            + 100.0);
+                    sample_buf[indx + i] += tnd_out;
+                }
+            } else if blip_len[2] != 0 {
+                self.triangle.blip.read_samples(&mut buf1);
+                for i in 0..len {
+                    let tnd_out = 159.79
+                        / (1.0 / (buf1[i] as f32 / 8227.0 + buf3[i] as f32 / 22638.0) + 100.0);
+                    sample_buf[indx + i] += tnd_out;
                 }
             } else {
+                self.noise.blip.read_samples(&mut buf2);
                 for i in 0..len {
-                    sample_buf[indx + i] = 95.88 / (8128.0 / sample_buf[indx + i] + 100.0);
+                    let tnd_out = 159.79
+                        / (1.0 / (buf2[i] as f32 / 12241.0 + buf3[i] as f32 / 22638.0) + 100.0);
+                    sample_buf[indx + i] += tnd_out;
+                }
+            }
+        }
+
+        /**************************************************************************
+           pulse_table [n] = 95.52 / (8128.0 / n + 100)
+           pulse_out = pulse_table [pulse1 + pulse2]
+
+           tnd_table [n] = 163.67 / (24329.0 / n + 100)
+           tnd_out = tnd_table [3 * triangle + 2 * noise + dmc]
+
+           output = pulse_out + tnd_out
+        */
+        pub fn mix_fast(&mut self, sample_buf: &mut Vec<f32>) {
+            let blip_len = [
+                self.pulse[0].blip.buffer.len(),
+                self.pulse[1].blip.buffer.len(),
+                self.triangle.blip.buffer.len(),
+                self.noise.blip.buffer.len(),
+                self.dmc.blip.buffer.len(),
+            ];
+            if blip_len == [0, 0, 0, 0, 0] {
+                return;
+            }
+
+            let mut len: usize = std::usize::MAX;
+            for v in blip_len.iter() {
+                if *v != 0 {
+                    len = len.min(*v);
                 }
             }
 
-            cnt = self.triangle.blip.read_samples(&mut buf);
-            for i in 0..cnt {
-                tnd_out[i] = buf[i] as f32 / 8227.0;
+            let mut buf1: Vec<u8> = Vec::new();
+            let mut buf2: Vec<u8> = Vec::new();
+            let indx = sample_buf.len();
+            // println!("len={},indx={:?}", len, indx);
+            buf1.resize(len, 0);
+            buf2.resize(len, 0);
+
+            /************************ pulse out **************************/
+            self.pulse[0].blip.read_samples(&mut buf1);
+            self.pulse[1].blip.read_samples(&mut buf2);
+            for i in 0..len {
+                sample_buf.push(MIX_PULSE_TBL[(buf1[i] + buf2[i]) as usize]);
             }
-            cnt = self.noise.blip.read_samples(&mut buf);
-            for i in 0..cnt {
-                tnd_out[i] = tnd_out[i] + buf[i] as f32 / 12241.0;
-            }
-            cnt = self.dmc.blip.read_samples(&mut buf);
-            if cnt == len {
+
+            /************************ tnd out **************************/
+            let mut buf3: Vec<u8> = Vec::new();
+            buf3.resize(len, 0);
+            self.dmc.blip.read_samples(&mut buf3);
+
+            if blip_len[2] != 0 && blip_len[3] != 0 {
+                self.triangle.blip.read_samples(&mut buf1);
+                self.noise.blip.read_samples(&mut buf2);
                 for i in 0..len {
-                    tnd_out[i] = 159.79 / (1.0 / (tnd_out[i] + buf[i] as f32 / 22638.0) + 100.0);
-                    sample_buf[indx + i] += tnd_out[i];
+                    sample_buf[indx + i] +=
+                        MIX_TND_TBL[(buf1[i] * 3 + buf2[i] * 2 + buf3[i]) as usize];
+                }
+            } else if blip_len[2] != 0 {
+                self.triangle.blip.read_samples(&mut buf1);
+                for i in 0..len {
+                    sample_buf[indx + i] += MIX_TND_TBL[(buf1[i] * 3 + buf2[i]) as usize];
                 }
             } else {
+                self.noise.blip.read_samples(&mut buf2);
                 for i in 0..len {
-                    tnd_out[i] = 159.79 / (1.0 / tnd_out[i] + 100.0);
-                    sample_buf[indx + i] += tnd_out[i];
+                    sample_buf[indx + i] += MIX_TND_TBL[(buf2[i] * 2 + buf3[i]) as usize];
                 }
             }
-            // println!("len={},sample_buf={:?}", sample_buf.len(), sample_buf);
         }
 
         /*  mode 0:    mode 1:       function
@@ -2501,15 +2563,7 @@ pub mod apu {
             e e e e    e e e - e    Envelope and linear counter
         */
         #[inline]
-        fn frame_counter_trig_mode0(&mut self) {
-            let mut cpu_cycles = get_cpu_cycles();
-            cpu_cycles = if self.last_cpu_tick > cpu_cycles {
-                cpu_cycles
-            } else {
-                cpu_cycles - self.last_cpu_tick
-            };
-            self.last_cpu_tick = cpu_cycles;
-
+        fn frame_counter_trig_mode0(&mut self, cpu_cycles: u32) {
             if (self.frame_counter & 0x1) == 0x1 {
                 self.trig_pulse_length(0);
                 self.trig_pulse_length(1);
@@ -2537,9 +2591,7 @@ pub mod apu {
             self.frame_counter = (self.frame_counter + 1) & 0x3;
         }
         #[inline]
-        fn frame_counter_trig_mode1(&mut self) {
-            let cpu_now_cycles = get_cpu_cycles();
-
+        fn frame_counter_trig_mode1(&mut self, cpu_cycles: u32) {
             if self.frame_counter == 0x1 || self.frame_counter == 0x4 {
                 self.trig_pulse_length(0);
                 self.trig_pulse_length(1);
@@ -2553,11 +2605,11 @@ pub mod apu {
                 self.trig_pulse_envelope(1);
                 self.trig_triangle_line();
             }
-            self.trig_pulse_timer(0, cpu_now_cycles);
-            self.trig_pulse_timer(1, cpu_now_cycles);
-            self.trig_triangle_timer(cpu_now_cycles);
-            self.trig_noise_timer(cpu_now_cycles);
-            self.trig_dmc_timer(cpu_now_cycles);
+            self.trig_pulse_timer(0, cpu_cycles);
+            self.trig_pulse_timer(1, cpu_cycles);
+            self.trig_triangle_timer(cpu_cycles);
+            self.trig_noise_timer(cpu_cycles);
+            self.trig_dmc_timer(cpu_cycles);
 
             self.frame_counter += 1;
             if self.frame_counter > 4 {
@@ -2565,6 +2617,14 @@ pub mod apu {
             }
         }
         pub fn frame_counter_trig(&mut self) {
+            let cpu_now_cycles = get_cpu_cycles();
+            let cpu_cycles = if self.last_cpu_tick > cpu_now_cycles {
+                cpu_now_cycles
+            } else {
+                cpu_now_cycles - self.last_cpu_tick
+            };
+            self.last_cpu_tick = cpu_now_cycles;
+
             /*  mode 0:    mode 1:       function
                 ---------  -----------  -----------------------------
                 - - - f    - - - - -    IRQ (if bit 6 is clear)
@@ -2572,9 +2632,9 @@ pub mod apu {
                 e e e e    e e e - e    Envelope and linear counter
             */
             if self.reg.frame_counter_ctrl.mode() {
-                self.frame_counter_trig_mode1();
+                self.frame_counter_trig_mode1(cpu_cycles);
             } else {
-                self.frame_counter_trig_mode0();
+                self.frame_counter_trig_mode0(cpu_cycles);
             }
         }
     }
@@ -2612,5 +2672,71 @@ pub mod apu {
         [
             398, 354, 316, 298, 276, 236, 210, 198, 176, 148, 132, 118, 98, 78, 66, 50,
         ],
+    ];
+    #[rustfmt::skip]
+    const MIX_PULSE_TBL: [f32; 31] = [
+        0.0, 0.011609139, 0.02293948, 0.034000948,
+        0.044803, 0.05535466, 0.06566453, 0.07574082,
+        0.0855914, 0.09522375, 0.10464504, 0.11386215,
+        0.12288164, 0.1317098, 0.14035264, 0.14881596,
+        0.15710525, 0.16522588, 0.17318292, 0.18098126,
+        0.18862559, 0.19612046, 0.20347017, 0.21067894,
+        0.21775076, 0.2246895, 0.23149887, 0.23818247,
+        0.24474378, 0.25118607, 0.25751257
+    ];
+
+    #[rustfmt::skip]
+    const MIX_TND_TBL: [f32; 203] = [
+        0.0, 0.006699824, 0.01334502, 0.019936256, 
+        0.02647418, 0.032959443, 0.039392676, 0.0457745, 
+        0.052105535, 0.05838638, 0.064617634, 0.07079987, 
+        0.07693369, 0.08301962, 0.08905826, 0.095050134, 
+        0.100995794, 0.10689577, 0.11275058, 0.118560754, 
+        0.12432679, 0.13004918, 0.13572845, 0.14136505, 
+        0.1469595, 0.15251222, 0.1580237, 0.1634944, 
+        0.16892476, 0.17431524, 0.17966628, 0.1849783,
+        0.19025174, 0.19548698, 0.20068447, 0.20584463, 
+        0.21096781, 0.21605444, 0.22110492, 0.2261196, 
+        0.23109888, 0.23604311, 0.24095272, 0.245828, 
+        0.25066936, 0.2554771, 0.26025164, 0.26499328, 
+        0.26970237, 0.27437922, 0.27902418, 0.28363758, 
+        0.28821972, 0.29277095, 0.29729152, 0.3017818, 
+        0.3062421, 0.31067267, 0.31507385, 0.31944588, 
+        0.32378912, 0.32810378, 0.3323902, 0.3366486, 
+        0.3408793, 0.34508255, 0.34925863, 0.35340777, 
+        0.35753027, 0.36162636, 0.36569634, 0.36974037, 
+        0.37375876, 0.37775174, 0.38171956, 0.38566244, 
+        0.38958064, 0.39347437, 0.39734384, 0.4011893, 
+        0.405011, 0.40880907, 0.41258383, 0.41633546, 
+        0.42006415, 0.42377013, 0.4274536, 0.43111476, 
+        0.43475384, 0.43837097, 0.44196644, 0.4455404, 
+        0.449093, 0.45262453, 0.45613506, 0.4596249, 
+        0.46309412, 0.46654293, 0.46997157, 0.47338015, 
+        0.47676894, 0.48013794, 0.48348752, 0.4868177, 
+        0.49012873, 0.4934207, 0.49669388, 0.49994832, 
+        0.50318426, 0.50640184, 0.5096012, 0.51278245, 
+        0.51594585, 0.5190914, 0.5222195, 0.52533007, 
+        0.52842325, 0.5314993, 0.53455836, 0.5376005, 
+        0.54062593, 0.5436348, 0.54662704, 0.54960304, 
+        0.55256283, 0.55550647, 0.5584343, 0.56134623, 
+        0.5642425, 0.56712323, 0.5699885, 0.5728384, 
+        0.5756732, 0.57849294, 0.5812977, 0.5840876, 
+        0.5868628, 0.58962345, 0.59236956, 0.59510136, 
+        0.5978189, 0.6005223, 0.6032116, 0.605887, 
+        0.60854864, 0.6111966, 0.6138308, 0.61645156, 
+        0.619059, 0.62165314, 0.624234, 0.62680185, 
+        0.6293567, 0.63189864, 0.6344277, 0.6369442, 
+        0.63944805, 0.64193934, 0.64441824, 0.64688486, 
+        0.6493392, 0.6517814, 0.6542115, 0.65662974, 
+        0.65903604, 0.6614306, 0.6638134, 0.66618466, 
+        0.66854435, 0.6708926, 0.67322946, 0.67555505, 
+        0.67786944, 0.68017274, 0.68246496, 0.6847462, 
+        0.6870166, 0.6892762, 0.69152504, 0.6937633, 
+        0.6959909, 0.69820803, 0.7004148, 0.7026111, 
+        0.7047972, 0.7069731, 0.7091388, 0.7112945, 
+        0.7134401, 0.7155759, 0.7177018, 0.7198179, 
+        0.72192425, 0.72402096, 0.726108, 0.72818565, 
+        0.7302538, 0.73231256, 0.73436195, 0.7364021, 
+        0.7384331, 0.7404549, 0.7424676
     ];
 }

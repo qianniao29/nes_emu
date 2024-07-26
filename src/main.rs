@@ -86,7 +86,7 @@ impl Soc {
         );
         /*-------------------------------------^---------------------------------------------*/
 
-        /*------------------------------cpu memory init--------------------------------------*/
+        /*------------------------------CPU memory init--------------------------------------*/
         let mut offset = 0;
         if self.rom_head.prgrom_size_16k > 1 {
             offset = 0x4000;
@@ -101,7 +101,7 @@ impl Soc {
         self.mem.bus_to_ppu = &mut self.ppu;
         /*-------------------------------------^----------------------------------------------*/
 
-        /*------------------------------cpu Register init-------------------------------------*/
+        /*------------------------------CPU Register init-------------------------------------*/
         self.cpu.bus_to_cpu_mem = &mut self.mem;
         self.cpu.reset();
         /*-------------------------------------^----------------------------------------------*/
@@ -129,24 +129,24 @@ fn main() -> Result<(), error::CustomError> {
     let file_name = &args[1];
     println!("File name: {}.", file_name);
 
-    /*------------------------------display init------------------------------------------*/
+    /*------------------------------Display init------------------------------------------*/
     let dis_std = disp::NTSC;
     let mut disp = disp_sdl2::DispSDL2::new();
     /*-----------------------------------^------------------------------------------------*/
 
-    /*------------------------------input init--------------------------------------------*/
+    /*------------------------------Input init--------------------------------------------*/
     let mut input = input_sdl2::InputSDL2::new(&disp.dev.sdl_context);
     /*-----------------------------------^------------------------------------------------*/
 
-    /*------------------------------sound init--------------------------------------------*/
+    /*------------------------------Sound init--------------------------------------------*/
     let mut sound = snd_base::Snd::new();
     sound.init();
-    /*-----------------------------------^------------------------------------------------*/
+    /*----------------------------------^-------------------------------------------------*/
 
-    /*--------------------------------soc init--------------------------------------------*/
+    /*-------------------------------SOC init---------------------------------------------*/
     let mut soc = Soc::new(sound.sample_rate);
     soc.init(file_name);
-    /*-----------------------------------^------------------------------------------------*/
+    /*----------------------------------^-------------------------------------------------*/
 
     let mut cpu_cycles_end;
     let mut master_cycles: u32;
@@ -164,7 +164,7 @@ fn main() -> Result<(), error::CustomError> {
             (sprite0_x, sprite0_y) = soc.ppu.get_sprint0(&mut sprite0_check_buf);
         }
 
-        /*------------Visible scanlines------------*/
+        /*---------------------------------Visible scanlines---------------------------------*/
         for j in 0..240 {
             if soc.ppu.reg.mask.bg() {
                 // render background
@@ -198,9 +198,9 @@ fn main() -> Result<(), error::CustomError> {
             //     }
             // }
 
-            /* all 262 line trigger 4 times, so trigger per 65 line. */
+            /* all 262 line trigger 4 times, so triggering per 65 line. */
             if j == 65 || j == 130 || j == 195 {
-                // APU frame counter trigger
+                // APU trigger frame counter
                 soc.apu.frame_counter_trig();
                 soc.apu.mix(&mut sound.dev.buffer.lock().unwrap());
             }
@@ -240,15 +240,17 @@ fn main() -> Result<(), error::CustomError> {
                 disp.draw_sprite_scanline(if soc.ppu.reg.mask.sm() { 0 } else { 8 }, j);
             }
         }
+        /*----------------------------------^-------------------------------------------*/
 
-        /*---------Post-render scanline-------*/
+        /*------------------------------Post-render scanline----------------------------*/
         master_cycles += dis_std.master_cycles_scanline as u32;
         cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
         soc.cpu
             .execute_instruction_until(&mut soc.mem, cpu_cycles_end);
         //sync horizon
+        /*----------------------------------^-------------------------------------------*/
 
-        /*------------Vblank scanline------------*/
+        /*-------------------------------Vblank scanline--------------------------------*/
         soc.ppu.vblank();
         // execute code after NMI
         for _ in 0..dis_std.vblank_length {
@@ -258,8 +260,9 @@ fn main() -> Result<(), error::CustomError> {
                 .execute_instruction_until(&mut soc.mem, cpu_cycles_end);
             //sync horizon
         }
+        /*----------------------------------^------------------------------------------*/
 
-        /*------------Pre-render scanlines------------*/
+        /*----------------------------Pre-render scanlines-----------------------------*/
         //clear ppu status, vblank
         soc.ppu.reg.status.0 = 0;
 
@@ -267,29 +270,39 @@ fn main() -> Result<(), error::CustomError> {
             &mut soc.mem,
             dis_std.cpu_cycle_per_frame as u32 - if is_odd_frame { 3 } else { 0 },
         );
+        is_odd_frame = !is_odd_frame;
         //sync horizon
 
-        //APU frame counter trigger 4th time
+        //APU trigger 4th frame counter
+        soc.apu.frame_counter_trig();
+        soc.apu.mix(&mut sound.dev.buffer.lock().unwrap());
 
         if soc.ppu.reg.mask.bg() {
             soc.ppu.cpoy_y_from_t_to_v();
         }
+        /*----------------------------------^------------------------------------------*/
 
+        /*------------------------------Display screen---------------------------------*/
         disp.display_present();
-        is_odd_frame = !is_odd_frame;
+        /*----------------------------------^------------------------------------------*/
 
+        /*--------------------------------Scan input-----------------------------------*/
         if input.get_key(&mut soc.mem.key) == usize::MAX {
             break 'running;
         }
+        /*----------------------------------^------------------------------------------*/
 
-        let sleep_msec = Duration::from_millis(1_000 / dis_std.frame_rate as u64)
-            .saturating_sub(start.elapsed());
+        /*------------------------Sleep & Control frame rate---------------------------*/
+        let sleep_usec = Duration::from_micros(1_000_000 / dis_std.frame_rate as u64)
+            .saturating_sub(start.elapsed())
+            + Duration::from_micros(1); //add 1 in case sleep_usec is 0.
         // println!(
         //     "Time elapsed: {:?}, sleep {:?}",
         //     start.elapsed(),
-        //     sleep_msec
+        //     sleep_usec
         // );
-        std::thread::sleep(sleep_msec);
+        std::thread::sleep(sleep_usec);
+        /*----------------------------------^------------------------------------------*/
     }
 
     Ok(())
