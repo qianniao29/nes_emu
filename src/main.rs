@@ -67,7 +67,7 @@ impl Soc {
     }
 
     pub fn init(&mut self, rom_file_name: &String) {
-        /*------------------------------ROM init-------------------------------------------*/
+        /*----------------------------------ROM init---------------------------------------*/
         let (prg_buf, pattern_buff1k) = match self.rom_head.load_rom(rom_file_name) {
             Ok((prg, pat)) => (prg, pat),
             Err(error) => {
@@ -78,7 +78,7 @@ impl Soc {
             Some(v) => v,
             None => panic!("load_rom error!"),
         };
-        // println!("head:{:#?}",head);
+        // println!("head:{:#?}", self.rom_head);
         assert_eq!(
             self.rom_head.timing,
             disp::TV_SYSTEM_NTSC,
@@ -124,7 +124,7 @@ impl Soc {
     }
 }
 
-fn main() -> Result<(), error::CustomError> {
+fn main() {
     let args: Vec<String> = env::args().collect();
     let file_name = &args[1];
     println!("File name: {}.", file_name);
@@ -152,8 +152,12 @@ fn main() -> Result<(), error::CustomError> {
     let mut master_cycles: u32;
     let mut sprite0_check_buf = [0_u8; 16];
     let mut is_odd_frame = false;
+    let mut start;
+    // let mut trig_apu_timers = |_: &mut cpu::Register, _: &mut memory::MemMap, ntick: u32| {
+    //     soc.apu.trig_timers(ntick);
+    // };
     'running: loop {
-        let start = Instant::now();
+        start = Instant::now();
         master_cycles = 0;
         cpu_cycles_reset();
         let (mut sprite0_x, mut sprite0_y) = (0xff, 0xff);
@@ -177,8 +181,13 @@ fn main() -> Result<(), error::CustomError> {
             // execute code in one scanline cycles
             master_cycles += dis_std.master_cycles_scanline as u32;
             cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-            soc.cpu
-                .execute_instruction_until(&mut soc.mem, cpu_cycles_end);
+            soc.cpu.execute_instruction_until_and_hook(
+                &mut soc.mem,
+                cpu_cycles_end,
+                |_, _, ntick: u32| {
+                    soc.apu.trig_timers(ntick);
+                },
+            );
             // let snapshot_cyc = cpu::get_cpu_cycles();
             // while cpu::get_cpu_cycles() <= cpu_cycles_end {
             //     cpu.execute_one_instruction(&mut mem);
@@ -245,8 +254,13 @@ fn main() -> Result<(), error::CustomError> {
         /*------------------------------Post-render scanline----------------------------*/
         master_cycles += dis_std.master_cycles_scanline as u32;
         cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-        soc.cpu
-            .execute_instruction_until(&mut soc.mem, cpu_cycles_end);
+        soc.cpu.execute_instruction_until_and_hook(
+            &mut soc.mem,
+            cpu_cycles_end,
+            |_, _, ntick: u32| {
+                soc.apu.trig_timers(ntick);
+            },
+        );
         //sync horizon
         /*----------------------------------^-------------------------------------------*/
 
@@ -256,8 +270,13 @@ fn main() -> Result<(), error::CustomError> {
         for _ in 0..dis_std.vblank_length {
             master_cycles += dis_std.master_cycles_scanline as u32;
             cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
-            soc.cpu
-                .execute_instruction_until(&mut soc.mem, cpu_cycles_end);
+            soc.cpu.execute_instruction_until_and_hook(
+                &mut soc.mem,
+                cpu_cycles_end,
+                |_, _, ntick: u32| {
+                    soc.apu.trig_timers(ntick);
+                },
+            );
             //sync horizon
         }
         /*----------------------------------^------------------------------------------*/
@@ -266,9 +285,12 @@ fn main() -> Result<(), error::CustomError> {
         //clear ppu status, vblank
         soc.ppu.reg.status.0 = 0;
 
-        soc.cpu.execute_instruction_until(
+        soc.cpu.execute_instruction_until_and_hook(
             &mut soc.mem,
             dis_std.cpu_cycle_per_frame as u32 - if is_odd_frame { 3 } else { 0 },
+            |_, _, ntick: u32| {
+                soc.apu.trig_timers(ntick);
+            },
         );
         is_odd_frame = !is_odd_frame;
         //sync horizon
@@ -296,6 +318,7 @@ fn main() -> Result<(), error::CustomError> {
         let sleep_usec = Duration::from_micros(1_000_000 / dis_std.frame_rate as u64)
             .saturating_sub(start.elapsed())
             + Duration::from_micros(1); //add 1 in case sleep_usec is 0.
+
         // println!(
         //     "Time elapsed: {:?}, sleep {:?}",
         //     start.elapsed(),
@@ -304,6 +327,4 @@ fn main() -> Result<(), error::CustomError> {
         std::thread::sleep(sleep_usec);
         /*----------------------------------^------------------------------------------*/
     }
-
-    Ok(())
 }

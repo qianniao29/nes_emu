@@ -459,12 +459,14 @@ pub mod cpu {
             }
         }
 
-        pub fn execute_instruction_until_and_hook(
+        pub fn execute_instruction_until_and_hook<F>(
             &mut self,
             mem: &mut MemMap,
             cpu_cycles_end: u32,
-            hook: fn(&mut Register, &mut MemMap, u32),
-        ) {
+            mut hook: F,
+        ) where
+            F: FnMut(&mut Register, &mut MemMap, u32),
+        {
             let mut t = get_cpu_cycles();
             let mut n;
             while t <= cpu_cycles_end {
@@ -1732,6 +1734,7 @@ pub mod apu {
     struct BlipData {
         period: f32,
         buffer: Vec<u8>,
+        smpl_tick: f32,
         tick: u32,
         ampl: u8,
     }
@@ -1741,6 +1744,7 @@ pub mod apu {
             BlipData {
                 period: cpu_clock_hz as f32 / sample_rate as f32,
                 buffer: Vec::new(),
+                smpl_tick: 0_f32,
                 tick: 0,
                 ampl: 0,
             }
@@ -1748,10 +1752,10 @@ pub mod apu {
 
         fn fill(&mut self, tick: u32, ampl: u8) {
             assert!(tick >= self.tick, "tick shouldn't less than self.tick!!!");
-            let count = ((tick as f32 / self.period) as usize).wrapping_sub(self.buffer.len());
 
-            for _ in 0..count {
+            while (self.smpl_tick + self.period) <= tick as f32 {
                 self.buffer.push(self.ampl);
+                self.smpl_tick += self.period;
             }
             self.ampl = ampl;
             self.tick = tick;
@@ -1759,12 +1763,10 @@ pub mod apu {
 
         fn read_samples(&mut self, buf: &mut [u8]) -> usize {
             let len = buf.len().min(self.buffer.len());
-            if len == 0 {
-                return 0;
-            }
             let d = self.buffer.drain(0..len);
             buf[..len].copy_from_slice(d.as_slice());
-            self.tick = (self.tick as f32 - self.period * len as f32) as u32;
+            self.tick = (self.tick as f32 - self.smpl_tick) as u32;
+            self.smpl_tick = 0_f32;
             len
         }
     }
@@ -1891,12 +1893,14 @@ pub mod apu {
     }
     fn set_psulse_2(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[0].timer_low = val;
-        apu_dev.pulse[0].freq_div.period = (apu_dev.pulse[0].freq_div.period & 0x700) | val as u16;
+        //timer is updated every APU cycle (i.e., every second CPU cycle)
+        apu_dev.pulse[0].freq_div.period =
+            (apu_dev.pulse[0].freq_div.period & 0xe00) | (val as u16 + 1) * 2;
     }
     fn set_psulse_3(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[0].length_counter.0 = val;
         apu_dev.pulse[0].freq_div.period =
-            (apu_dev.pulse[0].freq_div.period & 0x00ff) | ((val as u16 & 0x7) << 3);
+            (apu_dev.pulse[0].freq_div.period & 0x01fe) | ((val as u16 & 0x7) << 4);
 
         if apu_dev.reg.sta_ctrl.pulse1_en() {
             apu_dev.pulse[0].length_counter = LENGTH_COUNTER_TBL
@@ -1921,12 +1925,14 @@ pub mod apu {
     }
     fn set_psulse_6(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[1].timer_low = val;
-        apu_dev.pulse[1].freq_div.period = (apu_dev.pulse[1].freq_div.period & 0x700) | val as u16;
+        //timer is updated every APU cycle (i.e., every second CPU cycle)
+        apu_dev.pulse[1].freq_div.period =
+            (apu_dev.pulse[1].freq_div.period & 0xe00) | (val as u16 + 1) * 2;
     }
     fn set_psulse_7(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[1].length_counter.0 = val;
         apu_dev.pulse[1].freq_div.period =
-            (apu_dev.pulse[1].freq_div.period & 0x00ff) | ((val as u16 & 0x7) << 3);
+            (apu_dev.pulse[1].freq_div.period & 0x01fe) | ((val as u16 & 0x7) << 4);
         if apu_dev.reg.sta_ctrl.pulse1_en() {
             apu_dev.pulse[1].length_counter = LENGTH_COUNTER_TBL
                 [apu_dev.reg.pulse[1].length_counter.length_counter_load() as usize];
@@ -1940,7 +1946,8 @@ pub mod apu {
     }
     fn set_triangle_10(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.triangle.timer_low = val;
-        apu_dev.triangle.freq_div.period = (apu_dev.triangle.freq_div.period & 0x700) | val as u16;
+        apu_dev.triangle.freq_div.period =
+            (apu_dev.triangle.freq_div.period & 0x700) | val as u16 + 1;
     }
     fn set_triangle_11(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.triangle.length_counter.0 = val;
@@ -2196,8 +2203,8 @@ pub mod apu {
             let pulse = &mut self.pulse[pulse_id];
             if ((apu_reg.sta_ctrl.0 & 1 << pulse_id) == 0)
                 || (pulse.length_counter == 0)
-                || (pulse.freq_div.period < 8)
-                || (pulse.freq_div.period > 0x7ff)
+                || (pulse.freq_div.period < 8 * 2)
+                || (pulse.freq_div.period > 0x7ff * 2)
             {
                 return;
             }
@@ -2208,14 +2215,17 @@ pub mod apu {
             let seque_id = &mut pulse.seque_id;
             let duty_id = apu_reg.pulse[pulse_id].envelope.duty() as usize;
             //timer
-            pulse.freq_div.count(cpu_ticks / 2, |_, n| {
+            pulse.freq_div.count(cpu_ticks, |_, n| {
+                let mut tick = blip.tick;
                 for _ in 0..n {
                     blip.fill(
-                        blip.tick + 2 * period,
+                        tick,
                         PULSE_SEQUENCE_DUTY_TBL[duty_id][*seque_id as usize] * vl,
                     );
                     *seque_id = (*seque_id + 1) & 0x7;
+                    tick += period;
                 }
+                blip.tick = tick;
             });
         }
 
@@ -2260,10 +2270,10 @@ pub mod apu {
         fn trig_triangle_timer(&mut self, cpu_ticks: u32) {
             let triangle = &mut self.triangle;
             let apu_reg: &Register = &self.reg;
-            if (apu_reg.sta_ctrl.triangle_en() == false)
-                || (triangle.length_counter == 0)
-                || (triangle.freq_div.period <= 2)
+            if (triangle.freq_div.period <= 2)
                 || (triangle.freq_div.period > 0x7ff)
+                || (triangle.line_counter == 0)
+                || (triangle.length_counter == 0)
             {
                 return;
             }
@@ -2271,16 +2281,27 @@ pub mod apu {
             let blip = &mut triangle.blip;
             let period = triangle.freq_div.period as u32;
 
-            //timer
-            triangle.freq_div.count(cpu_ticks, |_, n| {
-                for _ in 0..n {
-                    blip.fill(
-                        blip.tick + period,
-                        TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize],
-                    );
-                    triangle.seque_id = (triangle.seque_id + 1) & 0x1f;
-                }
-            });
+            /* timer */
+            // Silencing the triangle channel merely halts it. It will continue to output its last value rather than 0.
+            if apu_reg.sta_ctrl.triangle_en() == true {
+                triangle.freq_div.count(cpu_ticks, |_, n| {
+                    let mut tick = blip.tick;
+                    for _ in 0..n {
+                        blip.fill(tick, TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize]);
+                        tick += period;
+                    }
+                    blip.tick = tick;
+                });
+            } else {
+                triangle.freq_div.count(cpu_ticks, |_, n| {
+                    let mut tick = blip.tick;
+                    for _ in 0..n {
+                        blip.fill(tick, TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize]);
+                        triangle.seque_id = (triangle.seque_id + 1) & 0x1f;
+                        tick += period;
+                    }
+                });
+            }
         }
 
         /*********************** Noise channel **************************
@@ -2324,7 +2345,10 @@ pub mod apu {
         fn trig_noise_timer(&mut self, cpu_ticks: u32) {
             let noise = &mut self.noise;
             let apu_reg: &Register = &self.reg;
-            if (apu_reg.sta_ctrl.triangle_en() == false) || (noise.length_counter == 0) {
+            if (apu_reg.sta_ctrl.triangle_en() == false)
+                || (noise.length_counter == 0)
+                || (noise.freq_div.period == 0)
+            {
                 return;
             }
 
@@ -2334,6 +2358,7 @@ pub mod apu {
 
             //timer
             noise.freq_div.count(cpu_ticks, |_, n| {
+                let mut tick = blip.tick;
                 for _ in 0..n {
                     let feedback = if apu_reg.noise.period.loop_en() {
                         //short mode
@@ -2343,8 +2368,10 @@ pub mod apu {
                     };
                     noise.shift = (noise.shift >> 1) | (feedback << 14);
                     let ampl = if noise.shift & 0x1 == 0 { 1 } else { 0 } * vl;
-                    blip.fill(blip.tick + period, ampl);
+                    blip.fill(tick, ampl);
+                    tick += period;
                 }
+                blip.tick = tick;
             });
         }
 
@@ -2357,11 +2384,15 @@ pub mod apu {
         #[inline(always)]
         fn trig_dmc_timer(&mut self, cpu_ticks: u32) {
             let dmc = &mut self.dmc;
-            if dmc.freq_div.period == 0 {
+            let apu_reg: &Register = &self.reg;
+
+            if (dmc.freq_div.period == 0)
+                || ((apu_reg.sta_ctrl.dmc_en() == false || dmc.sample_length == 0)
+                    && dmc.bit_indx == 8)
+            {
                 return;
             }
 
-            let apu_reg: &Register = &self.reg;
             let mem_bus = self.bus_to_cpu_mem;
             let blip = &mut dmc.blip;
             let period = dmc.freq_div.period as u32;
@@ -2369,6 +2400,7 @@ pub mod apu {
             //timer
             dmc.freq_div.count(cpu_ticks, |_, n| {
                 let mut ampl;
+                let mut tick = blip.tick;
                 for _ in 0..n {
                     ampl = 0;
                     if apu_reg.sta_ctrl.dmc_en() == true {
@@ -2404,8 +2436,10 @@ pub mod apu {
                         dmc.bit_indx += 1;
                         ampl = dmc.dac_value;
                     }
-                    blip.fill(blip.tick + period, ampl);
+                    blip.fill(tick, ampl);
+                    tick += period;
                 }
+                blip.tick = tick;
             });
         }
 
@@ -2433,6 +2467,7 @@ pub mod apu {
             if blip_len == [0, 0, 0, 0, 0] {
                 return;
             }
+            // println!("blip_len={:?}",blip_len);
 
             let mut len: usize = std::usize::MAX;
             for v in blip_len.iter() {
@@ -2487,6 +2522,7 @@ pub mod apu {
                     sample_buf[indx + i] += tnd_out;
                 }
             }
+            // println!("sample_buf={:?}", sample_buf);
         }
 
         /**************************************************************************
@@ -2554,6 +2590,7 @@ pub mod apu {
                     sample_buf[indx + i] += MIX_TND_TBL[(buf2[i] * 2 + buf3[i]) as usize];
                 }
             }
+            // println!("sample_buf={:?}", sample_buf);
         }
 
         /*  mode 0:    mode 1:       function
@@ -2563,7 +2600,7 @@ pub mod apu {
             e e e e    e e e - e    Envelope and linear counter
         */
         #[inline]
-        fn frame_counter_trig_mode0(&mut self, cpu_cycles: u32) {
+        fn frame_counter_trig_mode0(&mut self) {
             if (self.frame_counter & 0x1) == 0x1 {
                 self.trig_pulse_length(0);
                 self.trig_pulse_length(1);
@@ -2582,16 +2619,10 @@ pub mod apu {
             self.trig_pulse_envelope(1);
             self.trig_triangle_line();
 
-            self.trig_pulse_timer(0, cpu_cycles);
-            self.trig_pulse_timer(1, cpu_cycles);
-            self.trig_triangle_timer(cpu_cycles);
-            self.trig_noise_timer(cpu_cycles);
-            self.trig_dmc_timer(cpu_cycles);
-
             self.frame_counter = (self.frame_counter + 1) & 0x3;
         }
         #[inline]
-        fn frame_counter_trig_mode1(&mut self, cpu_cycles: u32) {
+        fn frame_counter_trig_mode1(&mut self) {
             if self.frame_counter == 0x1 || self.frame_counter == 0x4 {
                 self.trig_pulse_length(0);
                 self.trig_pulse_length(1);
@@ -2605,11 +2636,6 @@ pub mod apu {
                 self.trig_pulse_envelope(1);
                 self.trig_triangle_line();
             }
-            self.trig_pulse_timer(0, cpu_cycles);
-            self.trig_pulse_timer(1, cpu_cycles);
-            self.trig_triangle_timer(cpu_cycles);
-            self.trig_noise_timer(cpu_cycles);
-            self.trig_dmc_timer(cpu_cycles);
 
             self.frame_counter += 1;
             if self.frame_counter > 4 {
@@ -2617,14 +2643,6 @@ pub mod apu {
             }
         }
         pub fn frame_counter_trig(&mut self) {
-            let cpu_now_cycles = get_cpu_cycles();
-            let cpu_cycles = if self.last_cpu_tick > cpu_now_cycles {
-                cpu_now_cycles
-            } else {
-                cpu_now_cycles - self.last_cpu_tick
-            };
-            self.last_cpu_tick = cpu_now_cycles;
-
             /*  mode 0:    mode 1:       function
                 ---------  -----------  -----------------------------
                 - - - f    - - - - -    IRQ (if bit 6 is clear)
@@ -2632,10 +2650,18 @@ pub mod apu {
                 e e e e    e e e - e    Envelope and linear counter
             */
             if self.reg.frame_counter_ctrl.mode() {
-                self.frame_counter_trig_mode1(cpu_cycles);
+                self.frame_counter_trig_mode1();
             } else {
-                self.frame_counter_trig_mode0(cpu_cycles);
+                self.frame_counter_trig_mode0();
             }
+        }
+
+        pub fn trig_timers(&mut self, cpu_cycles: u32) {
+            self.trig_pulse_timer(0, cpu_cycles);
+            self.trig_pulse_timer(1, cpu_cycles);
+            self.trig_triangle_timer(cpu_cycles);
+            self.trig_noise_timer(cpu_cycles);
+            self.trig_dmc_timer(cpu_cycles);
         }
     }
 
@@ -2687,56 +2713,56 @@ pub mod apu {
 
     #[rustfmt::skip]
     const MIX_TND_TBL: [f32; 203] = [
-        0.0, 0.006699824, 0.01334502, 0.019936256, 
-        0.02647418, 0.032959443, 0.039392676, 0.0457745, 
-        0.052105535, 0.05838638, 0.064617634, 0.07079987, 
-        0.07693369, 0.08301962, 0.08905826, 0.095050134, 
-        0.100995794, 0.10689577, 0.11275058, 0.118560754, 
-        0.12432679, 0.13004918, 0.13572845, 0.14136505, 
-        0.1469595, 0.15251222, 0.1580237, 0.1634944, 
+        0.0, 0.006699824, 0.01334502, 0.019936256,
+        0.02647418, 0.032959443, 0.039392676, 0.0457745,
+        0.052105535, 0.05838638, 0.064617634, 0.07079987,
+        0.07693369, 0.08301962, 0.08905826, 0.095050134,
+        0.100995794, 0.10689577, 0.11275058, 0.118560754,
+        0.12432679, 0.13004918, 0.13572845, 0.14136505,
+        0.1469595, 0.15251222, 0.1580237, 0.1634944,
         0.16892476, 0.17431524, 0.17966628, 0.1849783,
-        0.19025174, 0.19548698, 0.20068447, 0.20584463, 
-        0.21096781, 0.21605444, 0.22110492, 0.2261196, 
-        0.23109888, 0.23604311, 0.24095272, 0.245828, 
-        0.25066936, 0.2554771, 0.26025164, 0.26499328, 
-        0.26970237, 0.27437922, 0.27902418, 0.28363758, 
-        0.28821972, 0.29277095, 0.29729152, 0.3017818, 
-        0.3062421, 0.31067267, 0.31507385, 0.31944588, 
-        0.32378912, 0.32810378, 0.3323902, 0.3366486, 
-        0.3408793, 0.34508255, 0.34925863, 0.35340777, 
-        0.35753027, 0.36162636, 0.36569634, 0.36974037, 
-        0.37375876, 0.37775174, 0.38171956, 0.38566244, 
-        0.38958064, 0.39347437, 0.39734384, 0.4011893, 
-        0.405011, 0.40880907, 0.41258383, 0.41633546, 
-        0.42006415, 0.42377013, 0.4274536, 0.43111476, 
-        0.43475384, 0.43837097, 0.44196644, 0.4455404, 
-        0.449093, 0.45262453, 0.45613506, 0.4596249, 
-        0.46309412, 0.46654293, 0.46997157, 0.47338015, 
-        0.47676894, 0.48013794, 0.48348752, 0.4868177, 
-        0.49012873, 0.4934207, 0.49669388, 0.49994832, 
-        0.50318426, 0.50640184, 0.5096012, 0.51278245, 
-        0.51594585, 0.5190914, 0.5222195, 0.52533007, 
-        0.52842325, 0.5314993, 0.53455836, 0.5376005, 
-        0.54062593, 0.5436348, 0.54662704, 0.54960304, 
-        0.55256283, 0.55550647, 0.5584343, 0.56134623, 
-        0.5642425, 0.56712323, 0.5699885, 0.5728384, 
-        0.5756732, 0.57849294, 0.5812977, 0.5840876, 
-        0.5868628, 0.58962345, 0.59236956, 0.59510136, 
-        0.5978189, 0.6005223, 0.6032116, 0.605887, 
-        0.60854864, 0.6111966, 0.6138308, 0.61645156, 
-        0.619059, 0.62165314, 0.624234, 0.62680185, 
-        0.6293567, 0.63189864, 0.6344277, 0.6369442, 
-        0.63944805, 0.64193934, 0.64441824, 0.64688486, 
-        0.6493392, 0.6517814, 0.6542115, 0.65662974, 
-        0.65903604, 0.6614306, 0.6638134, 0.66618466, 
-        0.66854435, 0.6708926, 0.67322946, 0.67555505, 
-        0.67786944, 0.68017274, 0.68246496, 0.6847462, 
-        0.6870166, 0.6892762, 0.69152504, 0.6937633, 
-        0.6959909, 0.69820803, 0.7004148, 0.7026111, 
-        0.7047972, 0.7069731, 0.7091388, 0.7112945, 
-        0.7134401, 0.7155759, 0.7177018, 0.7198179, 
-        0.72192425, 0.72402096, 0.726108, 0.72818565, 
-        0.7302538, 0.73231256, 0.73436195, 0.7364021, 
+        0.19025174, 0.19548698, 0.20068447, 0.20584463,
+        0.21096781, 0.21605444, 0.22110492, 0.2261196,
+        0.23109888, 0.23604311, 0.24095272, 0.245828,
+        0.25066936, 0.2554771, 0.26025164, 0.26499328,
+        0.26970237, 0.27437922, 0.27902418, 0.28363758,
+        0.28821972, 0.29277095, 0.29729152, 0.3017818,
+        0.3062421, 0.31067267, 0.31507385, 0.31944588,
+        0.32378912, 0.32810378, 0.3323902, 0.3366486,
+        0.3408793, 0.34508255, 0.34925863, 0.35340777,
+        0.35753027, 0.36162636, 0.36569634, 0.36974037,
+        0.37375876, 0.37775174, 0.38171956, 0.38566244,
+        0.38958064, 0.39347437, 0.39734384, 0.4011893,
+        0.405011, 0.40880907, 0.41258383, 0.41633546,
+        0.42006415, 0.42377013, 0.4274536, 0.43111476,
+        0.43475384, 0.43837097, 0.44196644, 0.4455404,
+        0.449093, 0.45262453, 0.45613506, 0.4596249,
+        0.46309412, 0.46654293, 0.46997157, 0.47338015,
+        0.47676894, 0.48013794, 0.48348752, 0.4868177,
+        0.49012873, 0.4934207, 0.49669388, 0.49994832,
+        0.50318426, 0.50640184, 0.5096012, 0.51278245,
+        0.51594585, 0.5190914, 0.5222195, 0.52533007,
+        0.52842325, 0.5314993, 0.53455836, 0.5376005,
+        0.54062593, 0.5436348, 0.54662704, 0.54960304,
+        0.55256283, 0.55550647, 0.5584343, 0.56134623,
+        0.5642425, 0.56712323, 0.5699885, 0.5728384,
+        0.5756732, 0.57849294, 0.5812977, 0.5840876,
+        0.5868628, 0.58962345, 0.59236956, 0.59510136,
+        0.5978189, 0.6005223, 0.6032116, 0.605887,
+        0.60854864, 0.6111966, 0.6138308, 0.61645156,
+        0.619059, 0.62165314, 0.624234, 0.62680185,
+        0.6293567, 0.63189864, 0.6344277, 0.6369442,
+        0.63944805, 0.64193934, 0.64441824, 0.64688486,
+        0.6493392, 0.6517814, 0.6542115, 0.65662974,
+        0.65903604, 0.6614306, 0.6638134, 0.66618466,
+        0.66854435, 0.6708926, 0.67322946, 0.67555505,
+        0.67786944, 0.68017274, 0.68246496, 0.6847462,
+        0.6870166, 0.6892762, 0.69152504, 0.6937633,
+        0.6959909, 0.69820803, 0.7004148, 0.7026111,
+        0.7047972, 0.7069731, 0.7091388, 0.7112945,
+        0.7134401, 0.7155759, 0.7177018, 0.7198179,
+        0.72192425, 0.72402096, 0.726108, 0.72818565,
+        0.7302538, 0.73231256, 0.73436195, 0.7364021,
         0.7384331, 0.7404549, 0.7424676
     ];
 }

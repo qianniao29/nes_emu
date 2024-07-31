@@ -29,8 +29,7 @@ pub mod snd_cpal {
                 .expect("no output device available");
             let def_config = device.default_output_config().unwrap();
             let sample_format = def_config.sample_format();
-            let mut config: cpal::StreamConfig = def_config.into();
-            config.buffer_size = cpal::BufferSize::Fixed(512 * config.channels as u32);
+            let config: cpal::StreamConfig = def_config.into();
             let sample_rate = config.sample_rate.0;
             // println!(
             //     "channels:{},sample_format:{},buffer_size:{:?},rate:{}",
