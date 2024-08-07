@@ -180,12 +180,13 @@ fn main() {
 
             // execute code in one scanline cycles
             master_cycles += dis_std.master_cycles_scanline as u32;
-            cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
+            cpu_cycles_end = (master_cycles / dis_std.master_cycles_per_cpu as u32) as u16;
             soc.cpu.execute_instruction_until_and_hook(
                 &mut soc.mem,
                 cpu_cycles_end,
-                |_, _, ntick: u32| {
-                    soc.apu.trig_timers(ntick);
+                |_, _, ntick: u16| {
+                    // APU trigger frame counter
+                    soc.apu.frame_counter_trig(ntick);
                 },
             );
             // let snapshot_cyc = cpu::get_cpu_cycles();
@@ -209,8 +210,6 @@ fn main() {
 
             /* all 262 line trigger 4 times, so triggering per 65 line. */
             if j == 65 || j == 130 || j == 195 {
-                // APU trigger frame counter
-                soc.apu.frame_counter_trig();
                 soc.apu.mix(&mut sound.dev.buffer.lock().unwrap());
             }
 
@@ -253,12 +252,13 @@ fn main() {
 
         /*------------------------------Post-render scanline----------------------------*/
         master_cycles += dis_std.master_cycles_scanline as u32;
-        cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
+        cpu_cycles_end = (master_cycles / dis_std.master_cycles_per_cpu as u32) as u16;
         soc.cpu.execute_instruction_until_and_hook(
             &mut soc.mem,
             cpu_cycles_end,
-            |_, _, ntick: u32| {
-                soc.apu.trig_timers(ntick);
+            |_, _, ntick: u16| {
+                // APU trigger frame counter
+                soc.apu.frame_counter_trig(ntick);
             },
         );
         //sync horizon
@@ -269,12 +269,13 @@ fn main() {
         // execute code after NMI
         for _ in 0..dis_std.vblank_length {
             master_cycles += dis_std.master_cycles_scanline as u32;
-            cpu_cycles_end = master_cycles / dis_std.master_cycles_per_cpu as u32;
+            cpu_cycles_end = (master_cycles / dis_std.master_cycles_per_cpu as u32) as u16;
             soc.cpu.execute_instruction_until_and_hook(
                 &mut soc.mem,
                 cpu_cycles_end,
-                |_, _, ntick: u32| {
-                    soc.apu.trig_timers(ntick);
+                |_, _, ntick: u16| {
+                    // APU trigger frame counter
+                    soc.apu.frame_counter_trig(ntick);
                 },
             );
             //sync horizon
@@ -287,16 +288,16 @@ fn main() {
 
         soc.cpu.execute_instruction_until_and_hook(
             &mut soc.mem,
-            dis_std.cpu_cycle_per_frame as u32 - if is_odd_frame { 3 } else { 0 },
-            |_, _, ntick: u32| {
-                soc.apu.trig_timers(ntick);
+            dis_std.cpu_cycle_per_frame - if is_odd_frame { 3 } else { 0 },
+            |_, _, ntick: u16| {
+                // APU trigger frame counter
+                soc.apu.frame_counter_trig(ntick);
             },
         );
         is_odd_frame = !is_odd_frame;
         //sync horizon
 
         //APU trigger 4th frame counter
-        soc.apu.frame_counter_trig();
         soc.apu.mix(&mut sound.dev.buffer.lock().unwrap());
 
         if soc.ppu.reg.mask.bg() {

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 pub mod cycle {
-    static mut CPU_CYCLES: u32 = 0;
+    static mut CPU_CYCLES: u16 = 0;
 
     pub fn cpu_cycles_reset() {
         unsafe {
@@ -9,13 +9,13 @@ pub mod cycle {
         }
     }
 
-    pub fn cpu_cycles_add(cnt: u32) {
+    pub fn cpu_cycles_add(cnt: u16) {
         unsafe {
             CPU_CYCLES = CPU_CYCLES.wrapping_add(cnt);
         }
     }
 
-    pub fn get_cpu_cycles() -> u32 {
+    pub fn get_cpu_cycles() -> u16 {
         unsafe { CPU_CYCLES }
     }
 }
@@ -25,6 +25,24 @@ pub mod memory {
     use crate::cpu2a03::apu;
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::ppu2c02::ppu;
+
+    /*
+    address         size 	  describe
+    $0000–$07FF 	$0800 	2 KB internal RAM
+    $0800–$0FFF 	$0800 	Mirrors of $0000–$07FF
+    $1000–$17FF 	$0800 	Mirrors of $0000–$07FF
+    $1800–$1FFF 	$0800 	Mirrors of $0000–$07FF
+    $2000–$2007 	$0008 	NES PPU registers
+    $2008–$3FFF 	$1FF8 	Mirrors of $2000–$2007 (repeats every 8 bytes)
+    $4000–$4017 	$0018 	NES APU and I/O registers
+    $4018–$401F 	$0008 	APU and I/O functionality that is normally disabled. See CPU Test Mode.
+    $4020–$FFFF 	$BFE0 	Cartridge space: PRG ROM, PRG RAM, and mapper registers
+
+    $4020           $1FDF 		Expansion ROM
+    $6000           $2000 		SRAM
+    $8000           $4000 		PRG-ROM
+    $C000           $4000 		PRG-ROM
+    */
 
     pub struct MemMap {
         pub ram: [u8; 0x800],
@@ -191,24 +209,6 @@ pub mod cpu {
     use bitfield;
     use bitflags::bitflags;
     use std::fmt;
-
-    /*
-    address         size 	  describe
-    $0000–$07FF 	$0800 	2 KB internal RAM
-    $0800–$0FFF 	$0800 	Mirrors of $0000–$07FF
-    $1000–$17FF 	$0800 	Mirrors of $0000–$07FF
-    $1800–$1FFF 	$0800 	Mirrors of $0000–$07FF
-    $2000–$2007 	$0008 	NES PPU registers
-    $2008–$3FFF 	$1FF8 	Mirrors of $2000–$2007 (repeats every 8 bytes)
-    $4000–$4017 	$0018 	NES APU and I/O registers
-    $4018–$401F 	$0008 	APU and I/O functionality that is normally disabled. See CPU Test Mode.
-    $4020–$FFFF 	$BFE0 	Cartridge space: PRG ROM, PRG RAM, and mapper registers
-
-    $4020 	$1FDF 		Expansion ROM
-    $6000 	$2000 		SRAM
-    $8000 	$4000 		PRG-ROM
-    $C000 	$4000 		PRG-ROM
-    */
 
     pub const NMI_VECT_ADDR: u16 = 0xFFFA;
     pub const REST_VECT_ADDR: u16 = 0xFFFC;
@@ -436,7 +436,7 @@ pub mod cpu {
             cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
 
             let instru_addring = &ISTRU_OP_CODE[machine_code as usize];
-            cpu_cycles_add(instru_addring.instru_base_cycle as u32);
+            cpu_cycles_add(instru_addring.instru_base_cycle as u16);
 
             let op_addr = instru_addring.addring_mode.addressing(self, mem);
             // print!(
@@ -453,7 +453,7 @@ pub mod cpu {
             // println!("{:#?}", instru_addring);
         }
 
-        pub fn execute_instruction_until(&mut self, mem: &mut MemMap, cpu_cycles_end: u32) {
+        pub fn execute_instruction_until(&mut self, mem: &mut MemMap, cpu_cycles_end: u16) {
             while get_cpu_cycles() <= cpu_cycles_end {
                 self.execute_one_instruction(mem);
             }
@@ -462,10 +462,10 @@ pub mod cpu {
         pub fn execute_instruction_until_and_hook<F>(
             &mut self,
             mem: &mut MemMap,
-            cpu_cycles_end: u32,
+            cpu_cycles_end: u16,
             mut hook: F,
         ) where
-            F: FnMut(&mut Register, &mut MemMap, u32),
+            F: FnMut(&mut Register, &mut MemMap, u16),
         {
             let mut t = get_cpu_cycles();
             let mut n;
@@ -535,7 +535,7 @@ pub mod cpu {
                     addr |= (mem.read(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     let val = addr.wrapping_add(cpu_reg.x as u16);
-                    cpu_cycles_add((((addr ^ val) >> 8) & 1) as u32);
+                    cpu_cycles_add((((addr ^ val) >> 8) & 1) as u16);
                     val
                 }
                 AddressingMode::AbsYI => {
@@ -551,7 +551,7 @@ pub mod cpu {
                     addr |= (mem.read(cpu_reg.pc) as u16) << 8;
                     cpu_reg.pc = cpu_reg.pc.wrapping_add(1);
                     let val = addr.wrapping_add(cpu_reg.y as u16);
-                    cpu_cycles_add(((addr ^ val) >> 8) as u32 & 1);
+                    cpu_cycles_add(((addr ^ val) >> 8) as u16 & 1);
                     val
                 }
                 AddressingMode::ZpXI => {
@@ -592,7 +592,7 @@ pub mod cpu {
                     let mut val = (mem.read(addr as u16) as u16)
                         | ((mem.read(addr.wrapping_add(1) as u16) as u16) << 8);
                     val = val.wrapping_add(cpu_reg.y as u16);
-                    cpu_cycles_add((((addr as u16 ^ val) >> 8) & 1) as u32);
+                    cpu_cycles_add((((addr as u16 ^ val) >> 8) & 1) as u16);
                     val
                 }
                 AddressingMode::Rel => {
@@ -1280,7 +1280,7 @@ pub mod cpu {
         }
 
         fn brunch_jmp(&self, cpu_reg: &mut Register, addr: u16) {
-            cpu_cycles_add((((addr ^ cpu_reg.pc) >> 8) & 1) as u32 + 1);
+            cpu_cycles_add((((addr ^ cpu_reg.pc) >> 8) & 1) as u16 + 1);
             cpu_reg.pc = addr;
         }
     }
@@ -1557,10 +1557,12 @@ pub mod cpu {
 pub mod apu {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::usize;
 
     use bitfield::{Bit, BitMut};
 
     use crate::common::{Bus, Irq};
+    use crate::cpu2a03::cpu;
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
     use crate::cpu2a03::memory::MemMap;
 
@@ -1634,14 +1636,14 @@ pub mod apu {
         length_counter: LengthCounterReg, //$400B
     }
 
-    /* L--- PPPP 	Loop noise (L), noise period (P)  */
+    /* M--- PPPP 	Mode flag (M), noise period (P)  */
     bitfield! {
         #[derive(Default)]
         pub struct PeriodReg(u8);
         impl Debug;
         u8;
         pub period , _: 3,0;
-        pub loop_en, _: 7;
+        pub mode_flag, _: 7;
     }
     #[derive(Default)]
     struct NoiseReg {
@@ -1721,13 +1723,13 @@ pub mod apu {
             }
         }
 
-        pub fn count<F>(&mut self, nticks: u32, mut trig_closure_hook: F)
+        pub fn count<F>(&mut self, nticks: u16, mut trig_closure_hook: F)
         where
-            F: FnMut(&mut Self, u32),
+            F: FnMut(&mut Self, u16),
         {
-            let m = self.counter as u32 + nticks;
-            self.counter = (m % self.period as u32) as u16;
-            trig_closure_hook(self, m / self.period as u32);
+            let m = self.counter + nticks;
+            self.counter = m % self.period;
+            trig_closure_hook(self, m / self.period);
         }
     }
 
@@ -1877,7 +1879,8 @@ pub mod apu {
         reg: Register,
         set_wave_reg_func_tbl: [fn(&mut Apu, u8); 24],
         cpu_clock_hz: u32,
-        frame_counter: u8,
+        frame_status: u16,
+        frame_cpu_ticks: u16,
         pulse: [PulseDev; 2],
         triangle: TriangleDev,
         noise: NoiseDev,
@@ -1907,24 +1910,22 @@ pub mod apu {
         apu_dev.reg.pulse[0].timer_low = val;
         //timer is updated every APU cycle (i.e., every second CPU cycle)
         apu_dev.pulse[0].freq_div.period =
-            (((apu_dev.reg.pulse[0].length_counter.timer_high() as u16) << 8
+            ((apu_dev.reg.pulse[0].length_counter.timer_high() as u16) << 8
                 | apu_dev.reg.pulse[0].timer_low as u16)
-                + 1)
-                * 2;
+                + 1;
+        apu_dev.pulse[0].freq_div.period *= 2;
     }
     fn set_psulse_3(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[0].length_counter.0 = val;
-        println!("val={:x}",val);
         apu_dev.pulse[0].freq_div.period =
-            (((apu_dev.reg.pulse[0].length_counter.timer_high() as u16) << 8
+            ((apu_dev.reg.pulse[0].length_counter.timer_high() as u16) << 8
                 | apu_dev.reg.pulse[0].timer_low as u16)
-                + 1)
-                * 2;
+                + 1;
+        apu_dev.pulse[0].freq_div.period *= 2;
 
         if apu_dev.reg.sta_ctrl.pulse1_en() {
             apu_dev.pulse[0].length_counter = LENGTH_COUNTER_TBL
                 [apu_dev.reg.pulse[0].length_counter.length_counter_load() as usize];
-                println!("length_counter={}",apu_dev.pulse[0].length_counter);
             apu_dev.pulse[0].evelope_div.counter = 0;
             apu_dev.pulse[0].seque_id = 0;
         }
@@ -1947,18 +1948,18 @@ pub mod apu {
         apu_dev.reg.pulse[1].timer_low = val;
         //timer is updated every APU cycle (i.e., every second CPU cycle)
         apu_dev.pulse[1].freq_div.period =
-            (((apu_dev.reg.pulse[1].length_counter.timer_high() as u16) << 8
+            ((apu_dev.reg.pulse[1].length_counter.timer_high() as u16) << 8
                 | apu_dev.reg.pulse[1].timer_low as u16)
-                + 1)
-                * 2;
+                + 1;
+        apu_dev.pulse[1].freq_div.period *= 2;
     }
     fn set_psulse_7(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[1].length_counter.0 = val;
         apu_dev.pulse[1].freq_div.period =
-            (((apu_dev.reg.pulse[1].length_counter.timer_high() as u16) << 8
+            ((apu_dev.reg.pulse[1].length_counter.timer_high() as u16) << 8
                 | apu_dev.reg.pulse[1].timer_low as u16)
-                + 1)
-                * 2;
+                + 1;
+        apu_dev.pulse[1].freq_div.period *= 2;
         if apu_dev.reg.sta_ctrl.pulse1_en() {
             apu_dev.pulse[1].length_counter = LENGTH_COUNTER_TBL
                 [apu_dev.reg.pulse[1].length_counter.length_counter_load() as usize];
@@ -1994,6 +1995,7 @@ pub mod apu {
         if apu_dev.reg.noise.envelope.constant_volume() == false {
             apu_dev.noise.evelope_div.period = apu_dev.reg.noise.envelope.volume() as u16 + 1;
             apu_dev.noise.evelope_div.counter = apu_dev.noise.evelope_div.period;
+            apu_dev.noise.volume = 15;
         } else {
             apu_dev.noise.volume = apu_dev.reg.noise.envelope.volume();
         }
@@ -2069,6 +2071,8 @@ pub mod apu {
             apu_dev.trig_pulse_envelope(1);
             apu_dev.trig_triangle_line();
         }
+        apu_dev.frame_status = 0;
+        apu_dev.frame_cpu_ticks = 0;
     }
 
     impl Bus for Apu {
@@ -2117,7 +2121,7 @@ pub mod apu {
             irq: *mut dyn Irq,
             mem_bus: *mut dyn Bus,
         ) -> Apu {
-            Apu {
+            let mut a = Apu {
                 reg: Default::default(),
                 #[rustfmt::skip]
                 set_wave_reg_func_tbl: [
@@ -2129,7 +2133,8 @@ pub mod apu {
                     set_reg_nop, set_status_ctrl_21, set_reg_nop, set_frame_counter_23,
                 ],
                 cpu_clock_hz,
-                frame_counter: 0,
+                frame_status: 0,
+                frame_cpu_ticks: 0,
                 pulse: [
                     PulseDev::new(cpu_clock_hz, sample_rate),
                     PulseDev::new(cpu_clock_hz, sample_rate),
@@ -2142,7 +2147,9 @@ pub mod apu {
                 last_cpu_tick: 0,
                 irq,
                 bus_to_cpu_mem: mem_bus,
-            }
+            };
+            a.frame_cpu_ticks = 12;
+            a
         }
 
         fn cpu_mem_read(&mut self, addr: u16) -> u8 {
@@ -2232,7 +2239,7 @@ pub mod apu {
             });
         }
         #[inline(always)]
-        fn trig_pulse_timer(&mut self, pulse_id: usize, cpu_ticks: u32) {
+        fn trig_pulse_timer(&mut self, pulse_id: usize, cpu_ticks: u16) {
             let apu_reg: &Register = &self.reg;
             let pulse = &mut self.pulse[pulse_id];
             if ((apu_reg.sta_ctrl.0 & 1 << pulse_id) == 0)
@@ -2299,7 +2306,7 @@ pub mod apu {
             }
         }
         #[inline(always)]
-        fn trig_triangle_timer(&mut self, cpu_ticks: u32) {
+        fn trig_triangle_timer(&mut self, cpu_ticks: u16) {
             let triangle = &mut self.triangle;
             if triangle.freq_div.period == 0
             // || (triangle.freq_div.period <= 2)
@@ -2376,10 +2383,10 @@ pub mod apu {
             }
         }
         #[inline(always)]
-        fn trig_noise_timer(&mut self, cpu_ticks: u32) {
+        fn trig_noise_timer(&mut self, cpu_ticks: u16) {
             let noise = &mut self.noise;
             let apu_reg: &Register = &self.reg;
-            if (apu_reg.sta_ctrl.triangle_en() == false)
+            if (apu_reg.sta_ctrl.noise_en() == false)
                 || (noise.length_counter == 0)
                 || (noise.freq_div.period == 0)
             {
@@ -2393,7 +2400,7 @@ pub mod apu {
             //timer
             noise.freq_div.count(cpu_ticks, |_, n| {
                 for _ in 0..n {
-                    let feedback = if apu_reg.noise.period.loop_en() {
+                    let feedback = if apu_reg.noise.period.mode_flag() {
                         //short mode
                         ((noise.shift >> 6) ^ noise.shift) & 0x1
                     } else {
@@ -2413,7 +2420,7 @@ pub mod apu {
             Reader ---> Buffer ---> Shifter ---> Output level ---> (to the mixer)
         *******************************************************************************/
         #[inline(always)]
-        fn trig_dmc_timer(&mut self, cpu_ticks: u32) {
+        fn trig_dmc_timer(&mut self, cpu_ticks: u16) {
             let dmc = &mut self.dmc;
             let apu_reg: &Register = &self.reg;
 
@@ -2628,50 +2635,116 @@ pub mod apu {
             e e e e    e e e - e    Envelope and linear counter
         */
         #[inline]
-        fn frame_counter_trig_mode0(&mut self) {
-            if self.frame_counter == 3 {
-                //IRQ
-                if self.reg.frame_counter_ctrl.irq_inhibit_flag() == false {
-                    self.frame_int_flag = true;
-                    self.irq_req();
+        fn frame_counter_trig_mode0(&mut self, cpu_cycles: u16) {
+            self.frame_cpu_ticks += cpu_cycles;
+
+            match self.frame_status {
+                num @ (0 | 2)
+                    if self.frame_cpu_ticks
+                        > FRAME_PEROID_MODE0[self.tv_system as usize][num as usize] =>
+                {
+                    self.trig_pulse_envelope(0);
+                    self.trig_pulse_envelope(1);
+                    self.trig_triangle_line();
+
+                    self.frame_status += 1;
                 }
-            }
-            if (self.frame_counter & 0x1) == 0x1 {
-                self.trig_pulse_length(0);
-                self.trig_pulse_length(1);
-                self.trig_pulse_sweep(0);
-                self.trig_pulse_sweep(1);
-                self.trig_triangle_length();
-                self.trig_noise_length();
-            }
-            self.trig_pulse_envelope(0);
-            self.trig_pulse_envelope(1);
-            self.trig_triangle_line();
+                1 if self.frame_cpu_ticks > FRAME_PEROID_MODE0[self.tv_system as usize][1] => {
+                    self.trig_pulse_length(0);
+                    self.trig_pulse_length(1);
+                    self.trig_pulse_sweep(0);
+                    self.trig_pulse_sweep(1);
+                    self.trig_triangle_length();
+                    self.trig_noise_length();
 
-            self.frame_counter = (self.frame_counter + 1) & 0x3;
+                    self.trig_pulse_envelope(0);
+                    self.trig_pulse_envelope(1);
+                    self.trig_triangle_line();
+
+                    self.frame_status = 2;
+                }
+                3 if self.frame_cpu_ticks == FRAME_PEROID_MODE0[self.tv_system as usize][3] => {
+                    //IRQ
+                    if self.reg.frame_counter_ctrl.irq_inhibit_flag() == false {
+                        self.frame_int_flag = true;
+                    }
+                }
+                3 if self.frame_cpu_ticks > FRAME_PEROID_MODE0[self.tv_system as usize][3] => {
+                    self.trig_pulse_length(0);
+                    self.trig_pulse_length(1);
+                    self.trig_pulse_sweep(0);
+                    self.trig_pulse_sweep(1);
+                    self.trig_triangle_length();
+                    self.trig_noise_length();
+
+                    self.trig_pulse_envelope(0);
+                    self.trig_pulse_envelope(1);
+                    self.trig_triangle_line();
+                    //IRQ
+                    if self.reg.frame_counter_ctrl.irq_inhibit_flag() == false {
+                        self.frame_int_flag = true;
+                    }
+                    self.frame_status = 4;
+                }
+                4 if self.frame_cpu_ticks
+                    >= (FRAME_PEROID_MODE0[self.tv_system as usize][3] + 3) =>
+                {
+                    self.frame_status = 0;
+                    self.frame_cpu_ticks -= FRAME_PEROID_MODE0[self.tv_system as usize][3] - 1;
+                    if self.frame_int_flag == true {
+                        self.irq_req();
+                    }
+                }
+                _ => {}
+            };
         }
+
         #[inline]
-        fn frame_counter_trig_mode1(&mut self) {
-            if self.frame_counter == 0x1 || self.frame_counter == 0x4 {
-                self.trig_pulse_length(0);
-                self.trig_pulse_length(1);
-                self.trig_pulse_sweep(0);
-                self.trig_pulse_sweep(1);
-                self.trig_triangle_length();
-                self.trig_noise_length();
-            }
-            if self.frame_counter != 3 {
-                self.trig_pulse_envelope(0);
-                self.trig_pulse_envelope(1);
-                self.trig_triangle_line();
-            }
+        fn frame_counter_trig_mode1(&mut self, cpu_cycles: u16) {
+            self.frame_cpu_ticks += cpu_cycles;
 
-            self.frame_counter += 1;
-            if self.frame_counter > 4 {
-                self.frame_counter = 0;
-            }
+            match self.frame_status {
+                num @ (0 | 2)
+                    if self.frame_cpu_ticks
+                        > FRAME_PEROID_MODE1[self.tv_system as usize][num as usize] =>
+                {
+                    self.trig_pulse_envelope(0);
+                    self.trig_pulse_envelope(1);
+                    self.trig_triangle_line();
+
+                    self.frame_status += 1;
+                }
+                num @ (1 | 4)
+                    if self.frame_cpu_ticks
+                        > FRAME_PEROID_MODE1[self.tv_system as usize][num as usize] =>
+                {
+                    self.trig_pulse_length(0);
+                    self.trig_pulse_length(1);
+                    self.trig_pulse_sweep(0);
+                    self.trig_pulse_sweep(1);
+                    self.trig_triangle_length();
+                    self.trig_noise_length();
+
+                    self.trig_pulse_envelope(0);
+                    self.trig_pulse_envelope(1);
+                    self.trig_triangle_line();
+
+                    if self.frame_status == 4 {
+                        self.frame_status = 0;
+                        self.frame_cpu_ticks -=
+                            FRAME_PEROID_MODE1[self.tv_system as usize][num as usize] - 1;
+                    } else {
+                        self.frame_status += 1;
+                    }
+                }
+                3 if self.frame_cpu_ticks > FRAME_PEROID_MODE1[self.tv_system as usize][3] => {
+                    self.frame_status = 4;
+                }
+                _ => {}
+            };
         }
-        pub fn frame_counter_trig(&mut self) {
+
+        pub fn frame_counter_trig(&mut self, cpu_cycles: u16) {
             /*  mode 0:    mode 1:       function
                 ---------  -----------  -----------------------------
                 - - - f    - - - - -    IRQ (if bit 6 is clear)
@@ -2679,13 +2752,11 @@ pub mod apu {
                 e e e e    e e e - e    Envelope and linear counter
             */
             if self.reg.frame_counter_ctrl.mode() {
-                self.frame_counter_trig_mode1();
+                self.frame_counter_trig_mode1(cpu_cycles);
             } else {
-                self.frame_counter_trig_mode0();
-            }
-        }
+                self.frame_counter_trig_mode0(cpu_cycles);
+            };
 
-        pub fn trig_timers(&mut self, cpu_cycles: u32) {
             self.trig_pulse_timer(0, cpu_cycles);
             self.trig_pulse_timer(1, cpu_cycles);
             self.trig_triangle_timer(cpu_cycles);
@@ -2793,5 +2864,14 @@ pub mod apu {
         0.72192425, 0.72402096, 0.726108, 0.72818565,
         0.7302538, 0.73231256, 0.73436195, 0.7364021,
         0.7384331, 0.7404549, 0.7424676
+    ];
+
+    const FRAME_PEROID_MODE0: [[u16; 4]; 2] = [
+        [7457, 14913 + 2, 22371, 29830 + 1], //NTSC
+        [8313, 16627, 24939, 33254],         //PAL
+    ];
+    const FRAME_PEROID_MODE1: [[u16; 5]; 2] = [
+        [7457, 14913 + 2, 22371, 29828, 37281 + 2], //NTSC
+        [8313, 16627, 24939, 33252, 41565],         //PAL
     ];
 }
