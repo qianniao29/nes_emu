@@ -1728,8 +1728,12 @@ pub mod apu {
             F: FnMut(&mut Self, u16),
         {
             let m = self.counter + nticks;
+            let n = m / self.period;
             self.counter = m % self.period;
-            trig_closure_hook(self, m / self.period);
+            if n == 0 {
+                return;
+            }
+            trig_closure_hook(self, n);
         }
     }
 
