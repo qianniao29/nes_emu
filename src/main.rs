@@ -153,9 +153,6 @@ fn main() {
     let mut sprite0_check_buf = [0_u8; 16];
     let mut is_odd_frame = false;
     let mut start;
-    // let mut trig_apu_timers = |_: &mut cpu::Register, _: &mut memory::MemMap, ntick: u32| {
-    //     soc.apu.trig_timers(ntick);
-    // };
     'running: loop {
         start = Instant::now();
         master_cycles = 0;

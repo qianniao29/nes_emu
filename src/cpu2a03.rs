@@ -479,7 +479,7 @@ pub mod cpu {
     }
 
     #[derive(Debug)]
-    pub enum AddressingMode {
+    enum AddressingMode {
         Acc,     //操作累加器 A: Op Accumulator
         Imp,     //隐含寻址 Implied Addressing
         Imm,     //立即寻址 Immediate Addressing
@@ -606,7 +606,7 @@ pub mod cpu {
     }
 
     #[derive(Debug)]
-    pub enum Instruction {
+    enum Instruction {
         LDA,  // LDA--由存储器取数送入累加器 A    M -> A
         LDX,  // LDX--由存储器取数送入寄存器 X    M -> X
         LDY,  // LDY--由存储器取数送入寄存器 Y    M -> Y
@@ -1286,15 +1286,15 @@ pub mod cpu {
     }
 
     #[derive(Debug)]
-    pub struct InstruAddring<'a> {
-        pub instru_name: &'a str,
-        pub instru: Instruction,
-        pub instru_base_cycle: u8,
-        pub addring_mode: AddressingMode,
+    struct InstruAddring<'a> {
+        instru_name: &'a str,
+        instru: Instruction,
+        instru_base_cycle: u8,
+        addring_mode: AddressingMode,
     }
 
     #[rustfmt::skip]
-    pub const ISTRU_OP_CODE: [InstruAddring; 256] = [
+    const ISTRU_OP_CODE: [InstruAddring; 256] = [
         InstruAddring { instru_name: "BRK", instru: Instruction::BRK,  instru_base_cycle : 7, addring_mode: AddressingMode::Imp },
         InstruAddring { instru_name: "ORA", instru: Instruction::ORA,  instru_base_cycle : 6, addring_mode: AddressingMode::IndX },
         InstruAddring { instru_name: "HK2", instru: Instruction::HK2,  instru_base_cycle : 2, addring_mode: AddressingMode::Imp },
@@ -1707,8 +1707,8 @@ pub mod apu {
 
     #[derive(Debug, Default)]
     struct Counter {
-        counter: u16,
-        period: u16,
+        counter: u32,
+        period: u32,
     }
     impl Counter {
         pub fn count_once<F>(&mut self, mut trig_closure_hook: F)
@@ -1723,9 +1723,9 @@ pub mod apu {
             }
         }
 
-        pub fn count<F>(&mut self, nticks: u16, mut trig_closure_hook: F)
+        pub fn count<F>(&mut self, nticks: u32, mut trig_closure_hook: F)
         where
-            F: FnMut(&mut Self, u16),
+            F: FnMut(&mut Self, u32),
         {
             let m = self.counter + nticks;
             let n = m / self.period;
@@ -1769,11 +1769,11 @@ pub mod apu {
 
         fn fill_dclk(&mut self, delta_tick: u32, ampl: u8) {
             let tick = self.tick + delta_tick;
+            self.ampl = ampl;
             while (self.smpl_tick + self.period) <= tick as f32 {
                 self.buffer.push(self.ampl);
                 self.smpl_tick += self.period;
             }
-            self.ampl = ampl;
             self.tick = tick;
         }
 
@@ -1792,10 +1792,12 @@ pub mod apu {
         evelope_div: Counter,
         length_counter: u8,
         sweep_div: Counter,
+        dst_period: u32,
         sweep_mute: bool,
         volume: u8,
         blip: BlipData,
         seque_id: u8,
+        enable: bool,
     }
     impl PulseDev {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
@@ -1804,10 +1806,12 @@ pub mod apu {
                 evelope_div: Default::default(),
                 length_counter: 0,
                 sweep_div: Default::default(),
+                dst_period: 0,
                 sweep_mute: false,
                 volume: 0,
                 blip: BlipData::new(cpu_clock_hz, sample_rate),
                 seque_id: 0,
+                enable: false,
             }
         }
     }
@@ -1899,7 +1903,7 @@ pub mod apu {
     fn set_psulse_0(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[0].envelope.0 = val;
         if apu_dev.reg.pulse[0].envelope.constant_volume() == false {
-            apu_dev.pulse[0].evelope_div.period = apu_dev.reg.pulse[0].envelope.volume() as u16 + 1;
+            apu_dev.pulse[0].evelope_div.period = apu_dev.reg.pulse[0].envelope.volume() as u32 + 1;
             apu_dev.pulse[0].evelope_div.counter = apu_dev.pulse[0].evelope_div.period;
         } else {
             apu_dev.pulse[0].volume = apu_dev.reg.pulse[0].envelope.volume();
@@ -1907,23 +1911,23 @@ pub mod apu {
     }
     fn set_psulse_1(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[0].sweep.0 = val;
-        apu_dev.pulse[0].sweep_div.period = apu_dev.reg.pulse[0].sweep.period() as u16 + 1;
+        apu_dev.pulse[0].sweep_div.period = apu_dev.reg.pulse[0].sweep.period() as u32 + 1;
         apu_dev.pulse[0].sweep_div.counter = apu_dev.pulse[0].sweep_div.period;
     }
     fn set_psulse_2(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[0].timer_low = val;
         //timer is updated every APU cycle (i.e., every second CPU cycle)
         apu_dev.pulse[0].freq_div.period =
-            ((apu_dev.reg.pulse[0].length_counter.timer_high() as u16) << 8
-                | apu_dev.reg.pulse[0].timer_low as u16)
+            ((apu_dev.reg.pulse[0].length_counter.timer_high() as u32) << 8
+                | apu_dev.reg.pulse[0].timer_low as u32)
                 + 1;
         apu_dev.pulse[0].freq_div.period *= 2;
     }
     fn set_psulse_3(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[0].length_counter.0 = val;
         apu_dev.pulse[0].freq_div.period =
-            ((apu_dev.reg.pulse[0].length_counter.timer_high() as u16) << 8
-                | apu_dev.reg.pulse[0].timer_low as u16)
+            ((apu_dev.reg.pulse[0].length_counter.timer_high() as u32) << 8
+                | apu_dev.reg.pulse[0].timer_low as u32)
                 + 1;
         apu_dev.pulse[0].freq_div.period *= 2;
 
@@ -1937,7 +1941,7 @@ pub mod apu {
     fn set_psulse_4(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[1].envelope.0 = val;
         if apu_dev.reg.pulse[1].envelope.constant_volume() == false {
-            apu_dev.pulse[1].evelope_div.period = apu_dev.reg.pulse[1].envelope.volume() as u16 + 1;
+            apu_dev.pulse[1].evelope_div.period = apu_dev.reg.pulse[1].envelope.volume() as u32 + 1;
             apu_dev.pulse[1].evelope_div.counter = apu_dev.pulse[1].evelope_div.period;
         } else {
             apu_dev.pulse[1].volume = apu_dev.reg.pulse[1].envelope.volume();
@@ -1945,23 +1949,23 @@ pub mod apu {
     }
     fn set_psulse_5(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[1].sweep.0 = val;
-        apu_dev.pulse[1].sweep_div.period = apu_dev.reg.pulse[1].sweep.period() as u16 + 1;
+        apu_dev.pulse[1].sweep_div.period = apu_dev.reg.pulse[1].sweep.period() as u32 + 1;
         apu_dev.pulse[1].sweep_div.counter = apu_dev.pulse[1].sweep_div.period;
     }
     fn set_psulse_6(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[1].timer_low = val;
         //timer is updated every APU cycle (i.e., every second CPU cycle)
         apu_dev.pulse[1].freq_div.period =
-            ((apu_dev.reg.pulse[1].length_counter.timer_high() as u16) << 8
-                | apu_dev.reg.pulse[1].timer_low as u16)
+            ((apu_dev.reg.pulse[1].length_counter.timer_high() as u32) << 8
+                | apu_dev.reg.pulse[1].timer_low as u32)
                 + 1;
         apu_dev.pulse[1].freq_div.period *= 2;
     }
     fn set_psulse_7(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.pulse[1].length_counter.0 = val;
         apu_dev.pulse[1].freq_div.period =
-            ((apu_dev.reg.pulse[1].length_counter.timer_high() as u16) << 8
-                | apu_dev.reg.pulse[1].timer_low as u16)
+            ((apu_dev.reg.pulse[1].length_counter.timer_high() as u32) << 8
+                | apu_dev.reg.pulse[1].timer_low as u32)
                 + 1;
         apu_dev.pulse[1].freq_div.period *= 2;
         if apu_dev.reg.sta_ctrl.pulse1_en() {
@@ -1978,15 +1982,15 @@ pub mod apu {
     fn set_triangle_10(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.triangle.timer_low = val;
         apu_dev.triangle.freq_div.period =
-            ((apu_dev.reg.triangle.length_counter.timer_high() as u16) << 8
-                | apu_dev.reg.triangle.timer_low as u16)
+            ((apu_dev.reg.triangle.length_counter.timer_high() as u32) << 8
+                | apu_dev.reg.triangle.timer_low as u32)
                 + 1;
     }
     fn set_triangle_11(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.triangle.length_counter.0 = val;
         apu_dev.triangle.freq_div.period =
-            ((apu_dev.reg.triangle.length_counter.timer_high() as u16) << 8
-                | apu_dev.reg.triangle.timer_low as u16)
+            ((apu_dev.reg.triangle.length_counter.timer_high() as u32) << 8
+                | apu_dev.reg.triangle.timer_low as u32)
                 + 1;
         if apu_dev.reg.sta_ctrl.pulse1_en() {
             apu_dev.triangle.length_counter = LENGTH_COUNTER_TBL
@@ -1997,7 +2001,7 @@ pub mod apu {
     fn set_noise_12(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.noise.envelope.0 = val;
         if apu_dev.reg.noise.envelope.constant_volume() == false {
-            apu_dev.noise.evelope_div.period = apu_dev.reg.noise.envelope.volume() as u16 + 1;
+            apu_dev.noise.evelope_div.period = apu_dev.reg.noise.envelope.volume() as u32 + 1;
             apu_dev.noise.evelope_div.counter = apu_dev.noise.evelope_div.period;
             apu_dev.noise.volume = 15;
         } else {
@@ -2007,7 +2011,8 @@ pub mod apu {
     fn set_noise_14(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.noise.period.0 = val;
         apu_dev.noise.freq_div.period = NOISE_FREQUENCE_TBL[apu_dev.tv_system as usize]
-            [apu_dev.reg.noise.period.period() as usize];
+            [apu_dev.reg.noise.period.period() as usize]
+            as u32;
     }
     fn set_noise_15(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.noise.length_counter = val >> 3;
@@ -2020,7 +2025,8 @@ pub mod apu {
     fn set_dmc_16(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.dmc.frequency.0 = val;
         apu_dev.dmc.freq_div.period = DMC_FREQUENCE_TBL[apu_dev.tv_system as usize]
-            [apu_dev.reg.dmc.frequency.frequency() as usize];
+            [apu_dev.reg.dmc.frequency.frequency() as usize]
+            as u32;
         if apu_dev.reg.dmc.frequency.irq_en() == false {
             apu_dev.dmc.int_flag = false;
         }
@@ -2041,9 +2047,15 @@ pub mod apu {
 
         if apu_dev.reg.sta_ctrl.pulse1_en() == false {
             apu_dev.pulse[0].length_counter = 0;
+            apu_dev.pulse[0].enable = false;
+        } else {
+            apu_dev.pulse[0].enable = true;
         }
         if apu_dev.reg.sta_ctrl.pulse2_en() == false {
             apu_dev.pulse[1].length_counter = 0;
+            apu_dev.pulse[1].enable = false;
+        } else {
+            apu_dev.pulse[1].enable = true;
         }
         if apu_dev.reg.sta_ctrl.triangle_en() == false {
             apu_dev.triangle.length_counter = 0;
@@ -2183,16 +2195,16 @@ pub mod apu {
         Envelope --------> Gate ------> Gate -------> Gate ---> (to mixer)
         *******************************************************************/
         #[inline(always)]
-        fn trig_pulse_envelope(&mut self, pulse_id: usize) {
-            let apu_reg: &Register = &self.reg;
-            let pulse = &mut self.pulse[pulse_id];
+        fn trig_pulse_envelope(&mut self, pulse_id: u8) {
+            let reg = &self.reg.pulse[pulse_id as usize].envelope;
+            let pulse = &mut self.pulse[pulse_id as usize];
 
-            if apu_reg.pulse[pulse_id].envelope.constant_volume() == false {
+            if reg.constant_volume() == false {
                 let volume = &mut pulse.volume;
                 pulse.evelope_div.count_once(|div| {
                     div.counter = div.period;
                     if *volume == 0 {
-                        if apu_reg.pulse[pulse_id].envelope.envelope_loop() == true {
+                        if reg.envelope_loop() == true {
                             *volume = 15;
                         }
                     } else {
@@ -2202,52 +2214,51 @@ pub mod apu {
             }
         }
         #[inline(always)]
-        fn trig_pulse_length(&mut self, pulse_id: usize) {
-            let apu_reg: &Register = &self.reg;
-            let pulse = &mut self.pulse[pulse_id];
+        fn trig_pulse_length(&mut self, pulse_id: u8) {
+            let reg = &self.reg.pulse[pulse_id as usize].envelope;
+            let pulse = &mut self.pulse[pulse_id as usize];
 
-            if ((apu_reg.sta_ctrl.0 & (1 << pulse_id)) != 0)
-                && (apu_reg.pulse[pulse_id].envelope.envelope_loop() == false)
-            {
+            if pulse.enable && (reg.envelope_loop() == false) {
                 if pulse.length_counter > 0 {
                     pulse.length_counter -= 1;
                 }
             }
         }
         #[inline(always)]
-        fn trig_pulse_sweep(&mut self, pulse_id: usize) {
-            let apu_reg: &Register = &self.reg;
-            let pulse = &mut self.pulse[pulse_id];
+        fn trig_pulse_sweep(&mut self, pulse_id: u8) {
+            let pulse = &mut self.pulse[pulse_id as usize];
+            if pulse.sweep_div.period == 0 {
+                return;
+            }
 
-            pulse.sweep_div.count_once(|div| {
-                let mut dst_period = pulse.freq_div.period / 2;
-                div.counter = div.period;
-                let result = dst_period >> apu_reg.pulse[pulse_id].sweep.shift();
-                if apu_reg.pulse[pulse_id].sweep.negate() {
-                    dst_period = dst_period.saturating_sub(result + 1 - pulse_id as u16);
+            let reg = &self.reg.pulse[pulse_id as usize].sweep;
+            pulse.sweep_div.count_once(|timer| {
+                timer.counter = timer.period;
+                let result = pulse.dst_period >> reg.shift();
+                pulse.dst_period = if reg.negate() {
+                    pulse
+                        .dst_period
+                        .saturating_sub(result + 1 - pulse_id as u32)
                 } else {
-                    dst_period = dst_period.saturating_add(result);
-                }
-                if apu_reg.pulse[pulse_id].sweep.enabled() == true
-                    && apu_reg.pulse[pulse_id].sweep.shift() != 0
-                {
-                    if (pulse.freq_div.counter > 7 * 2) && (dst_period < 0x800) {
-                        pulse.freq_div.counter = dst_period * 2;
-                        pulse.freq_div.period = dst_period * 2;
-                        pulse.sweep_mute = false;
-                    }
-                }
-                if (pulse.freq_div.counter < 8 * 2) || (dst_period > 0x7ff) {
+                    pulse.dst_period.saturating_add(result)
+                };
+                if (pulse.freq_div.period < 8 * 2) || (pulse.dst_period > 0x7ff) {
                     pulse.sweep_mute = true;
+                } else {
+                    pulse.sweep_mute = false;
+                    if reg.enabled() == true && reg.shift() != 0 {
+                        pulse.freq_div.period = pulse.dst_period * 2;
+                        pulse.freq_div.counter = pulse.freq_div.period;
+                    }
                 }
             });
         }
         #[inline(always)]
-        fn trig_pulse_timer(&mut self, pulse_id: usize, cpu_ticks: u16) {
-            let apu_reg: &Register = &self.reg;
-            let pulse = &mut self.pulse[pulse_id];
-            if ((apu_reg.sta_ctrl.0 & 1 << pulse_id) == 0)
-                || (pulse.sweep_mute == false)
+        fn trig_pulse_timer(&mut self, pulse_id: u8, cpu_ticks: u16) {
+            let reg = &self.reg.pulse[pulse_id as usize];
+            let pulse = &mut self.pulse[pulse_id as usize];
+            if (pulse.enable == false)
+                || (pulse.sweep_mute == true)
                 || (pulse.length_counter == 0)
                 || (pulse.freq_div.period < 8 * 2)
                 || (pulse.freq_div.period > 0x7ff * 2)
@@ -2256,12 +2267,12 @@ pub mod apu {
             }
 
             let blip = &mut pulse.blip;
-            let period = pulse.freq_div.period as u32;
+            let period = pulse.freq_div.period;
             let vl = pulse.volume;
             let seque_id = &mut pulse.seque_id;
-            let duty_id = apu_reg.pulse[pulse_id].envelope.duty() as usize;
+            let duty_id = reg.envelope.duty() as usize;
             //timer
-            pulse.freq_div.count(cpu_ticks, |_, n| {
+            pulse.freq_div.count(cpu_ticks as u32, |_, n| {
                 for _ in 0..n {
                     blip.fill_dclk(
                         period,
@@ -2329,18 +2340,18 @@ pub mod apu {
             };
 
             let blip = &mut triangle.blip;
-            let period = triangle.freq_div.period as u32;
+            let period = triangle.freq_div.period;
 
             /* timer */
             // Silencing the triangle channel merely halts it. It will continue to output its last value rather than 0.
             if mute {
-                triangle.freq_div.count(cpu_ticks, |_, n| {
+                triangle.freq_div.count(cpu_ticks as u32, |_, n| {
                     for _ in 0..n {
                         blip.fill_dclk(period, TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize]);
                     }
                 });
             } else {
-                triangle.freq_div.count(cpu_ticks, |_, n| {
+                triangle.freq_div.count(cpu_ticks as u32, |_, n| {
                     for _ in 0..n {
                         blip.fill_dclk(period, TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize]);
                         triangle.seque_id = (triangle.seque_id + 1) & 0x1f;
@@ -2402,7 +2413,7 @@ pub mod apu {
             let vl = noise.volume;
 
             //timer
-            noise.freq_div.count(cpu_ticks, |_, n| {
+            noise.freq_div.count(cpu_ticks as u32, |_, n| {
                 for _ in 0..n {
                     let feedback = if apu_reg.noise.period.mode_flag() {
                         //short mode
@@ -2437,10 +2448,10 @@ pub mod apu {
 
             let mem_bus = self.bus_to_cpu_mem;
             let blip = &mut dmc.blip;
-            let period = dmc.freq_div.period as u32;
+            let period = dmc.freq_div.period;
 
             //timer
-            dmc.freq_div.count(cpu_ticks, |_, n| {
+            dmc.freq_div.count(cpu_ticks as u32, |_, n| {
                 let mut ampl;
                 for _ in 0..n {
                     ampl = 0;
