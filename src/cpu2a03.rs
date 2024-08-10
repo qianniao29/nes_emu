@@ -1737,12 +1737,12 @@ pub mod apu {
         }
     }
 
-    struct BlipData {
+    pub struct BlipData {
         period: f32,
-        buffer: Vec<u8>,
+        pub buffer: Vec<f32>,
         smpl_tick: f32,
         tick: u32,
-        ampl: u8,
+        ampl: f32,
     }
 
     impl BlipData {
@@ -1752,11 +1752,11 @@ pub mod apu {
                 buffer: Vec::new(),
                 smpl_tick: 0_f32,
                 tick: 0,
-                ampl: 0,
+                ampl: 0_f32,
             }
         }
 
-        fn fill(&mut self, tick: u32, ampl: u8) {
+        fn fill(&mut self, tick: u32, ampl: f32) {
             assert!(tick >= self.tick, "tick shouldn't less than self.tick!!!");
 
             while (self.smpl_tick + self.period) <= tick as f32 {
@@ -1767,7 +1767,7 @@ pub mod apu {
             self.tick = tick;
         }
 
-        fn fill_dclk(&mut self, delta_tick: u32, ampl: u8) {
+        fn fill_dclk(&mut self, delta_tick: u32, ampl: f32) {
             let tick = self.tick + delta_tick;
             self.ampl = ampl;
             while (self.smpl_tick + self.period) <= tick as f32 {
@@ -1777,7 +1777,7 @@ pub mod apu {
             self.tick = tick;
         }
 
-        fn read_samples(&mut self, buf: &mut [u8]) -> usize {
+        fn read_samples(&mut self, buf: &mut [f32]) -> usize {
             let len = buf.len().min(self.buffer.len());
             let d = self.buffer.drain(0..len);
             buf[..len].copy_from_slice(d.as_slice());
@@ -1795,12 +1795,12 @@ pub mod apu {
         dst_period: u32,
         sweep_mute: bool,
         volume: u8,
-        blip: BlipData,
         seque_id: u8,
         enable: bool,
+        to_mix: u8,
     }
     impl PulseDev {
-        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+        fn new() -> Self {
             Self {
                 freq_div: Default::default(),
                 evelope_div: Default::default(),
@@ -1809,9 +1809,9 @@ pub mod apu {
                 dst_period: 0,
                 sweep_mute: false,
                 volume: 0,
-                blip: BlipData::new(cpu_clock_hz, sample_rate),
                 seque_id: 0,
                 enable: false,
+                to_mix: 0,
             }
         }
     }
@@ -1821,18 +1821,18 @@ pub mod apu {
         length_counter: u8,
         line_counter: u8,
         line_cnt_reload_flag: bool,
-        blip: BlipData,
         seque_id: u8,
+        to_mix: u8,
     }
     impl TriangleDev {
-        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+        fn new() -> Self {
             Self {
                 freq_div: Default::default(),
                 length_counter: 0,
                 line_counter: 0,
                 line_cnt_reload_flag: false,
-                blip: BlipData::new(cpu_clock_hz, sample_rate),
                 seque_id: 0,
+                to_mix: 0,
             }
         }
     }
@@ -1841,44 +1841,44 @@ pub mod apu {
         freq_div: Counter,
         evelope_div: Counter,
         length_counter: u8,
-        blip: BlipData,
         volume: u8,
         shift: u16,
+        to_mix: u8,
     }
     impl NoiseDev {
-        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+        fn new() -> Self {
             Self {
                 freq_div: Default::default(),
                 evelope_div: Default::default(),
                 length_counter: 0,
-                blip: BlipData::new(cpu_clock_hz, sample_rate),
                 volume: 0,
                 shift: 1,
+                to_mix: 0,
             }
         }
     }
 
     pub struct DmcDev {
         freq_div: Counter,
-        blip: BlipData,
         load_data: u8,
         dac_value: u8,
         sample_address: u16,
         sample_length: u16,
         bit_indx: u8,
         int_flag: bool,
+        to_mix: u8,
     }
     impl DmcDev {
-        fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+        fn new() -> Self {
             Self {
                 freq_div: Default::default(),
-                blip: BlipData::new(cpu_clock_hz, sample_rate),
                 load_data: 0,
                 dac_value: 0,
                 sample_address: 0,
                 sample_length: 0,
                 bit_indx: 8,
                 int_flag: false,
+                to_mix: 0,
             }
         }
     }
@@ -1896,6 +1896,8 @@ pub mod apu {
         tv_system: u8,
         frame_int_flag: bool,
         last_cpu_tick: u32,
+        mix_timer: Counter,
+        pub blip: BlipData,
         pub irq: *mut dyn Irq,
         pub bus_to_cpu_mem: *mut dyn Bus,
     }
@@ -2151,16 +2153,18 @@ pub mod apu {
                 cpu_clock_hz,
                 frame_status: 0,
                 frame_cpu_ticks: 0,
-                pulse: [
-                    PulseDev::new(cpu_clock_hz, sample_rate),
-                    PulseDev::new(cpu_clock_hz, sample_rate),
-                ],
-                triangle: TriangleDev::new(cpu_clock_hz, sample_rate),
-                noise: NoiseDev::new(cpu_clock_hz, sample_rate),
-                dmc: DmcDev::new(cpu_clock_hz, sample_rate),
+                pulse: [PulseDev::new(), PulseDev::new()],
+                triangle: TriangleDev::new(),
+                noise: NoiseDev::new(),
+                dmc: DmcDev::new(),
                 tv_system,
                 frame_int_flag: false,
                 last_cpu_tick: 0,
+                blip: BlipData::new(cpu_clock_hz, sample_rate),
+                mix_timer: Counter {
+                    counter: cpu_clock_hz / sample_rate,
+                    period: cpu_clock_hz / sample_rate,
+                },
                 irq,
                 bus_to_cpu_mem: mem_bus,
             };
@@ -2263,24 +2267,22 @@ pub mod apu {
                 || (pulse.freq_div.period < 8 * 2)
                 || (pulse.freq_div.period > 0x7ff * 2)
             {
+                pulse.to_mix = 0;
                 return;
             }
 
-            let blip = &mut pulse.blip;
-            let period = pulse.freq_div.period;
+            let to_mix = &mut pulse.to_mix;
             let vl = pulse.volume;
             let seque_id = &mut pulse.seque_id;
             let duty_id = reg.envelope.duty() as usize;
             //timer
-            pulse.freq_div.count(cpu_ticks as u32, |_, n| {
-                for _ in 0..n {
-                    blip.fill_dclk(
-                        period,
-                        PULSE_SEQUENCE_DUTY_TBL[duty_id][*seque_id as usize] * vl,
-                    );
+            for _ in 0..cpu_ticks {
+                pulse.freq_div.count_once(|timer| {
+                    timer.counter = timer.period;
+                    *to_mix = PULSE_SEQUENCE_DUTY_TBL[duty_id][*seque_id as usize] * vl;
                     *seque_id = (*seque_id + 1) & 0x7;
-                }
-            });
+                });
+            }
         }
 
         /*********************** Triangle channel **************************
@@ -2327,35 +2329,25 @@ pub mod apu {
             // || (triangle.freq_div.period <= 2)
             || (triangle.freq_div.period > 0x7ff)
             {
+                triangle.to_mix = 0;
                 return;
             }
             let apu_reg: &Register = &self.reg;
-            let mute = if apu_reg.sta_ctrl.triangle_en() == false
+            // Silencing the triangle channel merely halts it. It will continue to output its last value rather than 0.
+            if apu_reg.sta_ctrl.triangle_en() == false
                 || (triangle.line_counter == 0)
                 || (triangle.length_counter == 0)
             {
-                true
-            } else {
-                false
-            };
+                return;
+            }
 
-            let blip = &mut triangle.blip;
-            let period = triangle.freq_div.period;
-
+            let to_mix = &mut triangle.to_mix;
             /* timer */
-            // Silencing the triangle channel merely halts it. It will continue to output its last value rather than 0.
-            if mute {
-                triangle.freq_div.count(cpu_ticks as u32, |_, n| {
-                    for _ in 0..n {
-                        blip.fill_dclk(period, TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize]);
-                    }
-                });
-            } else {
-                triangle.freq_div.count(cpu_ticks as u32, |_, n| {
-                    for _ in 0..n {
-                        blip.fill_dclk(period, TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize]);
-                        triangle.seque_id = (triangle.seque_id + 1) & 0x1f;
-                    }
+            for _ in 0..cpu_ticks {
+                triangle.freq_div.count_once(|timer| {
+                    timer.counter = timer.period;
+                    *to_mix = TRIANGLE_SEQUENCE_TBL[triangle.seque_id as usize];
+                    triangle.seque_id = (triangle.seque_id + 1) & 0x1f;
                 });
             }
         }
@@ -2405,26 +2397,22 @@ pub mod apu {
                 || (noise.length_counter == 0)
                 || (noise.freq_div.period == 0)
             {
+                noise.to_mix = 0;
                 return;
             }
 
-            let blip = &mut noise.blip;
-            let period = noise.freq_div.period as u32;
             let vl = noise.volume;
-
-            //timer
-            noise.freq_div.count(cpu_ticks as u32, |_, n| {
-                for _ in 0..n {
-                    let feedback = if apu_reg.noise.period.mode_flag() {
-                        //short mode
-                        ((noise.shift >> 6) ^ noise.shift) & 0x1
-                    } else {
-                        ((noise.shift >> 1) ^ noise.shift) & 0x1
-                    };
-                    noise.shift = (noise.shift >> 1) | (feedback << 14);
-                    let ampl = if noise.shift & 0x1 == 0 { 1 } else { 0 } * vl;
-                    blip.fill_dclk(period, ampl);
-                }
+            let to_mix = &mut noise.to_mix;
+            /* timer */
+            noise.freq_div.count(cpu_ticks as u32, |_, _| {
+                let feedback = if apu_reg.noise.period.mode_flag() {
+                    //short mode
+                    ((noise.shift >> 6) ^ noise.shift) & 0x1
+                } else {
+                    ((noise.shift >> 1) ^ noise.shift) & 0x1
+                };
+                noise.shift = (noise.shift >> 1) | (feedback << 14);
+                *to_mix = if noise.shift & 0x1 == 0 { 1 } else { 0 } * vl;
             });
         }
 
@@ -2443,53 +2431,48 @@ pub mod apu {
                 || ((apu_reg.sta_ctrl.dmc_en() == false || dmc.sample_length == 0)
                     && dmc.bit_indx == 8)
             {
+                dmc.to_mix = 0;
                 return;
             }
 
             let mem_bus = self.bus_to_cpu_mem;
-            let blip = &mut dmc.blip;
-            let period = dmc.freq_div.period;
-
-            //timer
-            dmc.freq_div.count(cpu_ticks as u32, |_, n| {
-                let mut ampl;
-                for _ in 0..n {
-                    ampl = 0;
-                    if apu_reg.sta_ctrl.dmc_en() == true {
-                        if dmc.bit_indx == 8 {
-                            if dmc.sample_length != 0 {
-                                //read data from prgrom
-                                dmc.load_data = unsafe { (*mem_bus).read(dmc.sample_address) };
-                                // TODO: spend cpu cycles
-                                //The address is incremented; if it exceeds $FFFF, it is wrapped around to $8000.
-                                dmc.sample_address = dmc.sample_address.saturating_add(1) | 0x8000;
-                                dmc.sample_length -= 1;
-                                dmc.bit_indx = 0;
-                            } else {
-                                if apu_reg.dmc.frequency.loop_en() {
-                                    dmc.sample_length =
-                                        ((apu_reg.dmc.sample_length as u16) << 4) | 1;
-                                    dmc.sample_address =
-                                        ((apu_reg.dmc.sample_address as u16) << 6) | 0xc000;
-                                } else if apu_reg.dmc.frequency.irq_en() {
-                                    dmc.int_flag = true;
-                                }
-                            }
-                        }
-                    }
-                    if dmc.bit_indx < 8 {
-                        if dmc.load_data.bit(dmc.bit_indx as usize) {
-                            if dmc.dac_value <= 125 {
-                                dmc.dac_value += 2;
-                            }
+            let to_mix = &mut dmc.to_mix;
+            /* timer */
+            dmc.freq_div.count(cpu_ticks as u32, |_, _| {
+                let mut ampl = 0;
+                if apu_reg.sta_ctrl.dmc_en() == true {
+                    if dmc.bit_indx == 8 {
+                        if dmc.sample_length != 0 {
+                            //read data from prgrom
+                            dmc.load_data = unsafe { (*mem_bus).read(dmc.sample_address) };
+                            // TODO: spend cpu cycles
+                            //The address is incremented; if it exceeds $FFFF, it is wrapped around to $8000.
+                            dmc.sample_address = dmc.sample_address.saturating_add(1) | 0x8000;
+                            dmc.sample_length -= 1;
+                            dmc.bit_indx = 0;
                         } else {
-                            dmc.dac_value = dmc.dac_value.saturating_sub(2);
+                            if apu_reg.dmc.frequency.loop_en() {
+                                dmc.sample_length = ((apu_reg.dmc.sample_length as u16) << 4) | 1;
+                                dmc.sample_address =
+                                    ((apu_reg.dmc.sample_address as u16) << 6) | 0xc000;
+                            } else if apu_reg.dmc.frequency.irq_en() {
+                                dmc.int_flag = true;
+                            }
                         }
-                        dmc.bit_indx += 1;
-                        ampl = dmc.dac_value;
                     }
-                    blip.fill_dclk(period, ampl);
                 }
+                if dmc.bit_indx < 8 {
+                    if dmc.load_data.bit(dmc.bit_indx as usize) {
+                        if dmc.dac_value <= 125 {
+                            dmc.dac_value += 2;
+                        }
+                    } else {
+                        dmc.dac_value = dmc.dac_value.saturating_sub(2);
+                    }
+                    dmc.bit_indx += 1;
+                    ampl = dmc.dac_value;
+                }
+                *to_mix = ampl;
             });
         }
 
@@ -2506,73 +2489,31 @@ pub mod apu {
                       ----------------------------------------------------- + 100
                           (triangle / 8227) + (noise / 12241) + (dmc / 22638)
         */
-        pub fn mix(&mut self, sample_buf: &mut Vec<f32>) {
-            let blip_len = [
-                self.pulse[0].blip.buffer.len(),
-                self.pulse[1].blip.buffer.len(),
-                self.triangle.blip.buffer.len(),
-                self.noise.blip.buffer.len(),
-                self.dmc.blip.buffer.len(),
-            ];
-            if blip_len == [0, 0, 0, 0, 0] {
-                return;
-            }
-            // println!("blip_len={:?}", blip_len);
-
-            let mut len: usize = std::usize::MAX;
-            for v in blip_len.iter() {
-                if *v != 0 {
-                    len = len.min(*v);
-                }
-            }
-
-            let mut buf1: Vec<u8> = Vec::new();
-            let mut buf2: Vec<u8> = Vec::new();
-            let indx = sample_buf.len();
-            // println!("len={},indx={:?}", len, indx);
-            /************************ pulse out **************************/
-            buf1.resize(len, 0);
-            buf2.resize(len, 0);
-
-            self.pulse[0].blip.read_samples(&mut buf1);
-            self.pulse[1].blip.read_samples(&mut buf2);
-            for i in 0..len {
-                // f32 divisor can be 0.
-                sample_buf.push(95.88 / (8128.0 / (buf1[i] + buf2[i]) as f32 + 100.0));
-            }
-
-            /************************ tnd out **************************/
-            let mut buf3: Vec<u8> = Vec::new();
-            buf3.resize(len, 0);
-            self.dmc.blip.read_samples(&mut buf3);
-            if blip_len[2] != 0 && blip_len[3] != 0 {
-                self.triangle.blip.read_samples(&mut buf1);
-                self.noise.blip.read_samples(&mut buf2);
-                for i in 0..len {
-                    let tnd_out = 159.79
-                        / (1.0
-                            / (buf1[i] as f32 / 8227.0
-                                + buf2[i] as f32 / 12241.0
-                                + buf3[i] as f32 / 22638.0)
-                            + 100.0);
-                    sample_buf[indx + i] += tnd_out;
-                }
-            } else if blip_len[2] != 0 {
-                self.triangle.blip.read_samples(&mut buf1);
-                for i in 0..len {
-                    let tnd_out = 159.79
-                        / (1.0 / (buf1[i] as f32 / 8227.0 + buf3[i] as f32 / 22638.0) + 100.0);
-                    sample_buf[indx + i] += tnd_out;
-                }
-            } else {
-                self.noise.blip.read_samples(&mut buf2);
-                for i in 0..len {
-                    let tnd_out = 159.79
-                        / (1.0 / (buf2[i] as f32 / 12241.0 + buf3[i] as f32 / 22638.0) + 100.0);
-                    sample_buf[indx + i] += tnd_out;
-                }
-            }
-            // println!("sample_buf={:?}", sample_buf);
+        pub fn mix(&mut self, cpu_ticks: u16) {
+            self.mix_timer
+                .count(cpu_ticks as u32, |timer: &mut Counter, _| {
+                    if [
+                        self.pulse[0].to_mix,
+                        self.pulse[1].to_mix,
+                        self.triangle.to_mix,
+                        self.noise.to_mix,
+                        self.dmc.to_mix,
+                    ] == [0, 0, 0, 0, 0]
+                    {
+                        self.blip.fill_dclk(timer.period, 0_f32);
+                    } else {
+                        let pusle_out = 95.88
+                            / (8128.0 / (self.pulse[0].to_mix + self.pulse[1].to_mix) as f32
+                                + 100.0);
+                        let tnd_out = 159.79
+                            / (1.0
+                                / (self.triangle.to_mix as f32 / 8227.0
+                                    + self.noise.to_mix as f32 / 12241.0
+                                    + self.dmc.to_mix as f32 / 22638.0)
+                                + 100.0);
+                        self.blip.fill_dclk(timer.period, pusle_out + tnd_out);
+                    }
+                });
         }
 
         /**************************************************************************
@@ -2584,7 +2525,7 @@ pub mod apu {
 
            output = pulse_out + tnd_out
         */
-        pub fn mix_fast(&mut self, sample_buf: &mut Vec<f32>) {
+        /* pub fn mix_fast(&mut self, sample_buf: &mut Vec<f32>) {
             let blip_len = [
                 self.pulse[0].blip.buffer.len(),
                 self.pulse[1].blip.buffer.len(),
@@ -2641,7 +2582,7 @@ pub mod apu {
                 }
             }
             // println!("sample_buf={:?}", sample_buf);
-        }
+        } */
 
         /*  mode 0:    mode 1:       function
             ---------  -----------  -----------------------------
@@ -2777,6 +2718,8 @@ pub mod apu {
             self.trig_triangle_timer(cpu_cycles);
             self.trig_noise_timer(cpu_cycles);
             self.trig_dmc_timer(cpu_cycles);
+
+            self.mix(cpu_cycles);
         }
     }
 

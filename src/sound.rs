@@ -9,5 +9,6 @@ pub mod snd_base {
     pub trait SndFunc {
         fn new() -> Self;
         fn init(&mut self);
+        fn play(&mut self, sample_buf: &mut Vec<f32>);
     }
 }

@@ -207,7 +207,7 @@ fn main() {
 
             /* all 262 line trigger 4 times, so triggering per 65 line. */
             if j == 65 || j == 130 || j == 195 {
-                soc.apu.mix(&mut sound.dev.buffer.lock().unwrap());
+                sound.play(&mut soc.apu.blip.buffer);
             }
 
             //dot 256, 257
@@ -295,7 +295,7 @@ fn main() {
         //sync horizon
 
         //APU trigger 4th frame counter
-        soc.apu.mix(&mut sound.dev.buffer.lock().unwrap());
+        sound.play(&mut soc.apu.blip.buffer);
 
         if soc.ppu.reg.mask.bg() {
             soc.ppu.cpoy_y_from_t_to_v();

@@ -85,5 +85,13 @@ pub mod snd_cpal {
         }
 
         fn init(&mut self) {}
+
+        fn play(&mut self, sample_buf: &mut Vec<f32>) {
+            let mut snd_buf = self.dev.buffer.lock().unwrap();
+
+            for (_, v) in sample_buf.drain(..).enumerate() {
+                snd_buf.push(v);
+            }
+        }
     }
 }
