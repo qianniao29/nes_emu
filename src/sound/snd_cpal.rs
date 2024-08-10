@@ -1,6 +1,7 @@
 pub mod snd_cpal {
     use std::sync::{Arc, Mutex};
 
+    use blip_buf::BlipBuf;
     use cpal::{
         traits::{DeviceTrait, HostTrait, StreamTrait},
         Sample, SampleFormat, SupportedStreamConfig,
@@ -10,7 +11,7 @@ pub mod snd_cpal {
 
     pub struct CpalDev {
         stream: cpal::Stream,
-        pub buffer: Arc<Mutex<Vec<f32>>>,
+        buffer: Arc<Mutex<Vec<f32>>>,
     }
 
     impl CpalDev {
@@ -31,6 +32,7 @@ pub mod snd_cpal {
             let sample_format = def_config.sample_format();
             let config: cpal::StreamConfig = def_config.into();
             let sample_rate = config.sample_rate.0;
+            assert!(config.channels == 1 || config.channels == 2);
             // println!(
             //     "channels:{},sample_format:{},buffer_size:{:?},rate:{}",
             //     config.channels, sample_format, config.buffer_size, sample_rate
@@ -81,16 +83,25 @@ pub mod snd_cpal {
                     buffer: buf,
                 },
                 sample_rate,
+                channels: config.channels as u8,
+                volume_gain: 10000,
             }
         }
 
         fn init(&mut self) {}
 
-        fn play(&mut self, sample_buf: &mut Vec<f32>) {
+        fn play(&mut self, sample_buf: &mut BlipBuf) {
+            let len = sample_buf.samples_avail();
+            if len == 0 {
+                return;
+            }
+            let mut pcm_data: Vec<i16> = Vec::new();
+            pcm_data.resize(len as usize, 0);
+            sample_buf.read_samples(&mut pcm_data, false);
             let mut snd_buf = self.dev.buffer.lock().unwrap();
 
-            for (_, v) in sample_buf.drain(..).enumerate() {
-                snd_buf.push(v);
+            for v in pcm_data.iter() {
+                snd_buf.push(*v as f32 / self.volume_gain as f32);
             }
         }
     }

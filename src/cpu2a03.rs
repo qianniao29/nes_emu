@@ -1560,6 +1560,7 @@ pub mod apu {
     use std::usize;
 
     use bitfield::{Bit, BitMut};
+    use blip_buf::BlipBuf;
 
     use crate::common::{Bus, Irq};
     use crate::cpu2a03::cpu;
@@ -1738,52 +1739,39 @@ pub mod apu {
     }
 
     pub struct BlipData {
-        period: f32,
-        pub buffer: Vec<f32>,
-        smpl_tick: f32,
+        pub buffer: BlipBuf,
         tick: u32,
-        ampl: f32,
+        ampl: i32,
     }
 
     impl BlipData {
         fn new(cpu_clock_hz: u32, sample_rate: u32) -> Self {
+            let mut blip_buffer = BlipBuf::new(sample_rate);
+            blip_buffer.set_rates(f64::from(cpu_clock_hz), f64::from(sample_rate));
+
             BlipData {
-                period: cpu_clock_hz as f32 / sample_rate as f32,
-                buffer: Vec::new(),
-                smpl_tick: 0_f32,
+                buffer: blip_buffer,
                 tick: 0,
-                ampl: 0_f32,
+                ampl: 0,
             }
         }
 
-        fn fill(&mut self, tick: u32, ampl: f32) {
-            assert!(tick >= self.tick, "tick shouldn't less than self.tick!!!");
-
-            while (self.smpl_tick + self.period) <= tick as f32 {
-                self.buffer.push(self.ampl);
-                self.smpl_tick += self.period;
-            }
-            self.ampl = ampl;
+        fn fill(&mut self, tick: u32, ampl: i32) {
             self.tick = tick;
+            self.buffer.add_delta(tick, ampl - self.ampl);
+            self.ampl = ampl;
         }
 
-        fn fill_dclk(&mut self, delta_tick: u32, ampl: f32) {
+        fn fill_dclk(&mut self, delta_tick: u32, ampl: i32) {
             let tick = self.tick + delta_tick;
+            self.buffer.add_delta(tick, ampl - self.ampl);
             self.ampl = ampl;
-            while (self.smpl_tick + self.period) <= tick as f32 {
-                self.buffer.push(self.ampl);
-                self.smpl_tick += self.period;
-            }
             self.tick = tick;
         }
 
-        fn read_samples(&mut self, buf: &mut [f32]) -> usize {
-            let len = buf.len().min(self.buffer.len());
-            let d = self.buffer.drain(0..len);
-            buf[..len].copy_from_slice(d.as_slice());
-            self.tick = (self.tick as f32 - self.smpl_tick) as u32;
-            self.smpl_tick = 0_f32;
-            len
+        pub fn end(&mut self) {
+            self.buffer.end_frame(self.tick);
+            self.tick = 0;
         }
     }
 
@@ -1897,7 +1885,7 @@ pub mod apu {
         frame_int_flag: bool,
         last_cpu_tick: u32,
         mix_timer: Counter,
-        pub blip: BlipData,
+        pub mix_blip: BlipData,
         pub irq: *mut dyn Irq,
         pub bus_to_cpu_mem: *mut dyn Bus,
     }
@@ -2160,7 +2148,7 @@ pub mod apu {
                 tv_system,
                 frame_int_flag: false,
                 last_cpu_tick: 0,
-                blip: BlipData::new(cpu_clock_hz, sample_rate),
+                mix_blip: BlipData::new(cpu_clock_hz, sample_rate),
                 mix_timer: Counter {
                     counter: cpu_clock_hz / sample_rate,
                     period: cpu_clock_hz / sample_rate,
@@ -2500,7 +2488,7 @@ pub mod apu {
                         self.dmc.to_mix,
                     ] == [0, 0, 0, 0, 0]
                     {
-                        self.blip.fill_dclk(timer.period, 0_f32);
+                        self.mix_blip.fill_dclk(timer.period, 0);
                     } else {
                         let pusle_out = 95.88
                             / (8128.0 / (self.pulse[0].to_mix + self.pulse[1].to_mix) as f32
@@ -2511,7 +2499,9 @@ pub mod apu {
                                     + self.noise.to_mix as f32 / 12241.0
                                     + self.dmc.to_mix as f32 / 22638.0)
                                 + 100.0);
-                        self.blip.fill_dclk(timer.period, pusle_out + tnd_out);
+                        //audio output level within the range of 0.0 to 1.0.  fill with *10000
+                        self.mix_blip
+                            .fill_dclk(timer.period, ((pusle_out + tnd_out) * 10000.0) as i32);
                     }
                 });
         }
@@ -2525,64 +2515,31 @@ pub mod apu {
 
            output = pulse_out + tnd_out
         */
-        /* pub fn mix_fast(&mut self, sample_buf: &mut Vec<f32>) {
-            let blip_len = [
-                self.pulse[0].blip.buffer.len(),
-                self.pulse[1].blip.buffer.len(),
-                self.triangle.blip.buffer.len(),
-                self.noise.blip.buffer.len(),
-                self.dmc.blip.buffer.len(),
-            ];
-            if blip_len == [0, 0, 0, 0, 0] {
-                return;
-            }
-
-            let mut len: usize = std::usize::MAX;
-            for v in blip_len.iter() {
-                if *v != 0 {
-                    len = len.min(*v);
-                }
-            }
-
-            let mut buf1: Vec<u8> = Vec::new();
-            let mut buf2: Vec<u8> = Vec::new();
-            let indx = sample_buf.len();
-            // println!("len={},indx={:?}", len, indx);
-            buf1.resize(len, 0);
-            buf2.resize(len, 0);
-
-            /************************ pulse out **************************/
-            self.pulse[0].blip.read_samples(&mut buf1);
-            self.pulse[1].blip.read_samples(&mut buf2);
-            for i in 0..len {
-                sample_buf.push(MIX_PULSE_TBL[(buf1[i] + buf2[i]) as usize]);
-            }
-
-            /************************ tnd out **************************/
-            let mut buf3: Vec<u8> = Vec::new();
-            buf3.resize(len, 0);
-            self.dmc.blip.read_samples(&mut buf3);
-
-            if blip_len[2] != 0 && blip_len[3] != 0 {
-                self.triangle.blip.read_samples(&mut buf1);
-                self.noise.blip.read_samples(&mut buf2);
-                for i in 0..len {
-                    sample_buf[indx + i] +=
-                        MIX_TND_TBL[(buf1[i] * 3 + buf2[i] * 2 + buf3[i]) as usize];
-                }
-            } else if blip_len[2] != 0 {
-                self.triangle.blip.read_samples(&mut buf1);
-                for i in 0..len {
-                    sample_buf[indx + i] += MIX_TND_TBL[(buf1[i] * 3 + buf2[i]) as usize];
-                }
-            } else {
-                self.noise.blip.read_samples(&mut buf2);
-                for i in 0..len {
-                    sample_buf[indx + i] += MIX_TND_TBL[(buf2[i] * 2 + buf3[i]) as usize];
-                }
-            }
-            // println!("sample_buf={:?}", sample_buf);
-        } */
+        pub fn mix_fast(&mut self, cpu_ticks: u16) {
+            self.mix_timer
+                .count(cpu_ticks as u32, |timer: &mut Counter, _| {
+                    if [
+                        self.pulse[0].to_mix,
+                        self.pulse[1].to_mix,
+                        self.triangle.to_mix,
+                        self.noise.to_mix,
+                        self.dmc.to_mix,
+                    ] == [0, 0, 0, 0, 0]
+                    {
+                        self.mix_blip.fill_dclk(timer.period, 0);
+                    } else {
+                        let pusle_out =
+                            MIX_PULSE_TBL[(self.pulse[0].to_mix + self.pulse[1].to_mix) as usize];
+                        let tnd_out = MIX_TND_TBL[(self.triangle.to_mix * 3
+                            + self.noise.to_mix * 2
+                            + self.dmc.to_mix)
+                            as usize];
+                        //audio output level within the range of 0.0 to 1.0.  fill with *10000
+                        self.mix_blip
+                            .fill_dclk(timer.period, ((pusle_out + tnd_out) * 10000.0) as i32);
+                    }
+                });
+        }
 
         /*  mode 0:    mode 1:       function
             ---------  -----------  -----------------------------

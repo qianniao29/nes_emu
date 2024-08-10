@@ -205,9 +205,10 @@ fn main() {
             //     }
             // }
 
-            /* all 262 line trigger 4 times, so triggering per 65 line. */
+            /*play audio, all 262 line trigger 4 times, so triggering per 65 line. */
             if j == 65 || j == 130 || j == 195 {
-                sound.play(&mut soc.apu.blip.buffer);
+                soc.apu.mix_blip.end();
+                sound.play(&mut soc.apu.mix_blip.buffer);
             }
 
             //dot 256, 257
@@ -294,8 +295,9 @@ fn main() {
         is_odd_frame = !is_odd_frame;
         //sync horizon
 
-        //APU trigger 4th frame counter
-        sound.play(&mut soc.apu.blip.buffer);
+        //play audio trigger 4th
+        soc.apu.mix_blip.end();
+        sound.play(&mut soc.apu.mix_blip.buffer);
 
         if soc.ppu.reg.mask.bg() {
             soc.ppu.cpoy_y_from_t_to_v();

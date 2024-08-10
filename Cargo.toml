@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 bitfield = "0.15.0"
 bitflags = "2.3.3"
+blip_buf = "0.1.4"
 cpal = "0.15.3"
 sdl2 = { version = "0.37.0", features = ["unsafe_textures"] }
