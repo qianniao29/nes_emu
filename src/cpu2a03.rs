@@ -1967,7 +1967,6 @@ pub mod apu {
     }
     fn set_triangle_8(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.triangle.linear_counter.0 = val;
-        apu_dev.triangle.line_counter = apu_dev.reg.triangle.linear_counter.linear_counter();
     }
     fn set_triangle_10(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.triangle.timer_low = val;
@@ -1982,11 +1981,11 @@ pub mod apu {
             ((apu_dev.reg.triangle.length_counter.timer_high() as u32) << 8
                 | apu_dev.reg.triangle.timer_low as u32)
                 + 1;
-        if apu_dev.reg.sta_ctrl.pulse1_en() {
+        if apu_dev.reg.sta_ctrl.triangle_en() {
             apu_dev.triangle.length_counter = LENGTH_COUNTER_TBL
                 [apu_dev.reg.triangle.length_counter.length_counter_load() as usize];
-            apu_dev.triangle.line_cnt_reload_flag = true;
         }
+        apu_dev.triangle.line_cnt_reload_flag = true;
     }
     fn set_noise_12(apu_dev: &mut Apu, val: u8) {
         apu_dev.reg.noise.envelope.0 = val;
@@ -2299,14 +2298,15 @@ pub mod apu {
             let apu_reg: &Register = &self.reg;
 
             if apu_reg.sta_ctrl.triangle_en() {
-                if apu_reg.triangle.linear_counter.control() == false {
-                    triangle.line_cnt_reload_flag = false;
+                if triangle.line_cnt_reload_flag {
+                    triangle.line_counter = apu_reg.triangle.linear_counter.linear_counter();
+                    if apu_reg.triangle.linear_counter.control() == false {
+                        triangle.line_cnt_reload_flag = false;
+                    }
+                } else {
                     if triangle.line_counter > 0 {
                         triangle.line_counter -= 1;
                     }
-                }
-                if triangle.line_cnt_reload_flag {
-                    triangle.line_counter = apu_reg.triangle.length_counter.length_counter_load();
                 }
             }
         }
