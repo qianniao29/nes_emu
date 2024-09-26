@@ -8,6 +8,7 @@ mod common;
 mod cpu2a03;
 mod display;
 mod input;
+mod mapper;
 mod ppu2c02;
 mod rom_fs;
 mod sound;
@@ -26,8 +27,13 @@ use display::disp::{self, DisplayFunc};
 use display::display_sdl2::disp_sdl2;
 use input::input::InputFunc;
 use input::input_sdl2::input_sdl2;
+use mapper::{
+    mapper::{Mapper, MapperFunc, MapperX},
+    mapper_mmc1::mapper_mmc1::MapperMmc1,
+    mapper_nrom::mapper_nrom::MapperNrom,
+};
 use ppu2c02::ppu;
-use rom_fs::rom::{self, RomHead};
+use rom_fs::rom::{self, Rom, RomHead};
 use sound::{
     snd_base::{self, SndFunc},
     snd_cpal::snd_cpal,
@@ -44,14 +50,33 @@ struct Soc {
     pub ppu: ppu::Ppu,
     pub apu: apu::Apu,
     pub mem: memory::MemMap,
-    pub rom_head: RomHead,
+    pub rom: Rom,
+    pub mapper: Mapper,
 }
 
 impl Soc {
-    pub fn new(sample_rate: u32) -> Self {
+    pub fn new(sample_rate: u32, rom_file_name: &String) -> Self {
+        let mut rom = Rom::new();
+        rom.load_rom(rom_file_name)
+            .expect("Problem opening the file");
+        // println!("head:{:#?}", self.rom.rom_head);
+        assert_eq!(
+            rom.rom_head.timing,
+            disp::TV_SYSTEM_NTSC,
+            "Just support NTSC system!!!"
+        );
+
+        let mapper = match rom.rom_head.flag6.map_lid() | (rom.rom_head.flag7.map_hid() << 4) {
+            0 => Mapper::new(MapperX::Mapper0(MapperNrom::new())),
+            1 => Mapper::new(MapperX::Mapper1(MapperMmc1::new())),
+            _ => unimplemented!("Unsupported mapper."),
+        };
+
         Self {
             cpu: cpu::Core::new(unsafe { addr_of_mut!(DUMMY) }),
-            ppu: ppu::Ppu::new(unsafe { addr_of_mut!(DUMMY) }),
+            ppu: ppu::Ppu::new(unsafe { addr_of_mut!(DUMMY) }, unsafe {
+                addr_of_mut!(DUMMY)
+            }),
             apu: apu::Apu::new(
                 disp::NTSC.cpu_clock_hz,
                 sample_rate,
@@ -62,40 +87,31 @@ impl Soc {
             mem: memory::MemMap::new(unsafe { addr_of_mut!(DUMMY) }, unsafe {
                 addr_of_mut!(DUMMY)
             }),
-            rom_head: Default::default(),
+            rom,
+            mapper,
         }
     }
 
-    pub fn init(&mut self, rom_file_name: &String) {
-        /*----------------------------------ROM init---------------------------------------*/
-        let (prg_buf, pattern_buff1k) = match self.rom_head.load_rom(rom_file_name) {
-            Ok((prg, pat)) => (prg, pat),
-            Err(error) => {
-                panic!("Problem opening the file: {:?}", error)
-            }
-        };
-        let prgrom_buf = match prg_buf {
-            Some(v) => v,
-            None => panic!("load_rom error!"),
-        };
-        // println!("head:{:#?}", self.rom_head);
-        assert_eq!(
-            self.rom_head.timing,
-            disp::TV_SYSTEM_NTSC,
-            "Just support NTSC system!!!"
+    pub fn init(&mut self) {
+        /*----------------------------------Mapper init-------------------------------------*/
+        self.mapper.mapping_name_table(
+            self.rom.rom_head.flag6.four_screen(),
+            self.rom.rom_head.flag6.mirror_flag(),
+            &self.rom.pattern_buff1k,
         );
         /*-------------------------------------^---------------------------------------------*/
 
         /*------------------------------CPU memory init--------------------------------------*/
         let mut offset = 0;
-        if self.rom_head.prgrom_size_16k > 1 {
+        if self.rom.rom_head.prgrom_size_16k > 1 {
             offset = 0x4000;
         }
+        let prg_buf = self.rom.prg_buf.expect("load_rom error!");
         self.mem.prg_rom = [
-            &prgrom_buf[0x0..0x2000],
-            &prgrom_buf[0x2000..0x4000],
-            &prgrom_buf[offset + 0x00..offset + 0x2000],
-            &prgrom_buf[offset + 0x2000..offset + 0x4000],
+            &prg_buf[0x0..0x2000],
+            &prg_buf[0x2000..0x4000],
+            &prg_buf[offset + 0x00..offset + 0x2000],
+            &prg_buf[offset + 0x2000..offset + 0x4000],
         ];
         self.mem.bus_to_apu = &mut self.apu;
         self.mem.bus_to_ppu = &mut self.ppu;
@@ -107,14 +123,13 @@ impl Soc {
         /*-------------------------------------^----------------------------------------------*/
 
         /*--------------------------------PPU init--------------------------------------------*/
-        for i in 0..8 {
-            self.ppu.mem.bank[i] = pattern_buff1k[i].clone();
-        }
-        self.ppu.mem.mapping_name_table(
-            self.rom_head.flag6.four_screen(),
-            self.rom_head.flag6.mirror_flag(),
-        );
         self.ppu.irq = &mut self.cpu;
+        self.ppu.mem.bus_to_mapper = &mut self.mapper;
+        // self.ppu.mem.mapping_name_table(
+        //         self.rom.rom_head.flag6.four_screen(),
+        //         self.rom.rom_head.flag6.mirror_flag(),
+        //         &self.rom.pattern_buff1k,
+        //     );
         /*-----------------------------------^------------------------------------------------*/
 
         /*--------------------------------APU init--------------------------------------------*/
@@ -144,8 +159,8 @@ fn main() {
     /*----------------------------------^-------------------------------------------------*/
 
     /*-------------------------------SOC init---------------------------------------------*/
-    let mut soc = Soc::new(sound.sample_rate);
-    soc.init(file_name);
+    let mut soc = Soc::new(sound.sample_rate, file_name);
+    soc.init();
     /*----------------------------------^-------------------------------------------------*/
 
     let mut cpu_cycles_end;
@@ -317,7 +332,7 @@ fn main() {
         /*------------------------Sleep & Control frame rate---------------------------*/
         let sleep_usec = Duration::from_micros(1_000_000 / dis_std.frame_rate as u64)
             .saturating_sub(start.elapsed())
-            + Duration::from_micros(1); //add 1 in case sleep_usec is 0.
+            + Duration::from_nanos(1); //add 1 in case sleep_usec is 0.
 
         // println!(
         //     "Time elapsed: {:?}, sleep {:?}",
@@ -326,5 +341,13 @@ fn main() {
         // );
         std::thread::sleep(sleep_usec);
         /*----------------------------------^------------------------------------------*/
+    }
+
+    // should manual drop when emulator as a mod
+    if let Some(prg_buf_ref) = soc.rom.prg_buf {
+        // 重新创建一个 Box 来拥有 prg_buf_ref 的数据
+        let reclaimed_box = unsafe { Box::from_raw(prg_buf_ref as *const [u8] as *mut [u8]) };
+        // 显式释放 reclaimed_box
+        std::mem::drop(reclaimed_box);
     }
 }

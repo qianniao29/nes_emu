@@ -19,11 +19,11 @@ pub mod ppu {
     $3F20-$3FFF 	$00E0 	$3F00-$3F1F 镜像
      */
     pub struct MemMap {
-        pub bank: [Rc<RefCell<Vec<u8>>>; 16],
         pub palette_indx_tbl: [u8; 0x20],
         pub pseudo_cache: u8,
         pub oam: [u8; 0x100],
         pub oam2: [Sprite; 8],
+        pub bus_to_mapper: *mut dyn Bus,
     }
 
     impl Bus for MemMap {
@@ -31,12 +31,8 @@ pub mod ppu {
             let addr_map = addr & 0x3fff;
 
             if addr_map < 0x3f00 {
-                let i: usize = (addr_map >> 10).into();
-                let j: usize = (addr_map & 0x3ff).into();
                 let val = self.pseudo_cache;
-                let bank = self.bank[i].clone();
-
-                self.pseudo_cache = bank.borrow()[j];
+                self.pseudo_cache = unsafe { (*self.bus_to_mapper).read(addr) };
                 val
             } else {
                 let palet_addr: usize = (addr_map & 0x1f).into();
@@ -49,11 +45,7 @@ pub mod ppu {
             let addr_map = addr & 0x3fff;
 
             if addr_map < 0x3f00 {
-                let i: usize = (addr_map >> 10).into();
-                let j: usize = (addr_map & 0x3ff).into();
-                let bank = self.bank[i].clone();
-
-                bank.borrow_mut()[j] = data;
+                unsafe { (*self.bus_to_mapper).write(addr, data) };
             } else {
                 let palet_addr: usize = (addr_map & 0x1f).into();
                 if palet_addr & 0x3 != 0 {
@@ -68,13 +60,13 @@ pub mod ppu {
     }
 
     impl<'a> MemMap {
-        pub fn new() -> Self {
+        pub fn new(mapper: *mut dyn Bus) -> Self {
             MemMap {
-                bank: Default::default(),
                 palette_indx_tbl: [0; 0x20],
                 pseudo_cache: 0,
                 oam: [0; 0x100],
                 oam2: Default::default(),
+                bus_to_mapper: mapper,
             }
         }
 
@@ -82,58 +74,11 @@ pub mod ppu {
             let addr_map = addr & 0x3fff;
 
             if addr_map < 0x3f00 {
-                let i: usize = (addr_map >> 10).into();
-                let j: usize = (addr_map & 0x3ff).into();
-                let bank = self.bank[i].clone();
-                let val = bank.borrow()[j];
+                let val = unsafe { (*self.bus_to_mapper).read(addr) };
                 val
             } else {
                 let palet_addr: usize = (addr_map & 0x1f).into();
                 self.palette_indx_tbl[palet_addr]
-            }
-        }
-
-        pub fn mapping_name_table(&mut self, four_screen: bool, mirror_flag: bool) {
-            let mut vram_buff0 = Vec::new();
-            vram_buff0.resize(1024, 0);
-            let mut vram_buff1 = Vec::new();
-            vram_buff1.resize(1024, 0);
-            let vram = vec![
-                Rc::new(RefCell::new(vram_buff0)),
-                Rc::new(RefCell::new(vram_buff1)),
-            ];
-
-            if four_screen {
-                // 4 屏
-                let mut exvram_buff0 = Vec::new();
-                exvram_buff0.resize(1024, 0);
-                let mut exvram_buff1 = Vec::new();
-                exvram_buff1.resize(1024, 0);
-                let exvram = vec![
-                    Rc::new(RefCell::new(exvram_buff0)),
-                    Rc::new(RefCell::new(exvram_buff1)),
-                ];
-                self.bank[8] = vram[0].clone();
-                self.bank[9] = vram[1].clone();
-                self.bank[10] = exvram[0].clone();
-                self.bank[11] = exvram[1].clone();
-            } else if mirror_flag {
-                // 横版
-                self.bank[8] = vram[0].clone();
-                self.bank[9] = vram[1].clone();
-                self.bank[10] = vram[0].clone();
-                self.bank[11] = vram[1].clone();
-            } else {
-                // 纵版
-                self.bank[8] = vram[0].clone();
-                self.bank[9] = vram[0].clone();
-                self.bank[10] = vram[1].clone();
-                self.bank[11] = vram[1].clone();
-            }
-
-            for i in 12..16 {
-                //镜像地址
-                self.bank[i] = self.bank[i - 4].clone();
             }
         }
     }
@@ -450,10 +395,10 @@ pub mod ppu {
     }
 
     impl Ppu {
-        pub fn new(irq: *mut dyn Irq) -> Ppu {
+        pub fn new(irq: *mut dyn Irq, mapper: *mut dyn Bus) -> Ppu {
             Ppu {
                 reg: self::Register::new(),
-                mem: self::MemMap::new(),
+                mem: self::MemMap::new(mapper),
                 irq,
             }
         }
