@@ -2,10 +2,9 @@ pub mod rom {
     use bitfield;
     use std::cell::RefCell;
     use std::fs::File;
-    use std::io::{BufRead, BufReader, Error, Read, Seek, SeekFrom, Write};
+    use std::io::{Error, Read, Seek, SeekFrom};
     use std::rc::Rc;
 
-    use crate::common::error;
     /* byte 6
     Flags 6:
            D~7654 3210
@@ -60,7 +59,8 @@ pub mod rom {
     }
 
     /* byte 8
-    Mapper MSB/Submapper
+    Mapper MSB/Submapper    use std::{cell::RefCell, rc::Rc};
+
        D~7654 3210
          ---------
          SSSS NNNN
@@ -256,16 +256,12 @@ pub mod rom {
     }
     pub struct Rom {
         pub rom_head: RomHead,
-        pub pattern_buff1k: Vec<Rc<RefCell<Vec<u8>>>>,
-        pub prg_buf: Option<&'static [u8]>,
     }
 
     impl Rom {
         pub fn new() -> Self {
             Rom {
                 rom_head: Default::default(),
-                pattern_buff1k: Vec::new(),
-                prg_buf: None,
             }
         }
 
@@ -273,67 +269,66 @@ pub mod rom {
             rom_file: &mut File,
             prgrom_size_16k: u8,
             trainer_flag: bool,
-        ) -> Result<Vec<u8>, Error> {
-            let prgrom_size: u32 = (prgrom_size_16k as u32) * 16 * 1024;
-
+        ) -> Result<Vec<Rc<RefCell<Vec<u8>>>>, Error> {
             if trainer_flag {
                 rom_file.seek(SeekFrom::Current(512))?;
             }
 
-            let mut prgrom_buf = Vec::new();
-            prgrom_buf.resize(prgrom_size as usize, 0);
-            rom_file.read(&mut prgrom_buf)?;
+            let mut prgrom_buf_8k = Vec::new();
+            for _ in 0..(prgrom_size_16k * 2) {
+                let mut buf = Vec::new();
+                buf.resize(8192, 0);
+                rom_file.read(&mut buf)?;
+                prgrom_buf_8k.push(Rc::new(RefCell::new(buf)));
+            }
 
-            Ok(prgrom_buf)
+            Ok(prgrom_buf_8k)
         }
 
         fn read_chrrom(
             rom_file: &mut File,
             chrrom_size_8k: u8,
         ) -> Result<Vec<Rc<RefCell<Vec<u8>>>>, Error> {
-            let mut pattern_buff1k = Vec::new();
+            let mut pattern_buf_1k = Vec::new();
             for _ in 0..(chrrom_size_8k * 8) {
                 let mut chrrom_buf = Vec::new();
                 chrrom_buf.resize(1024, 0);
                 rom_file.read(&mut chrrom_buf)?;
-                pattern_buff1k.push(Rc::new(RefCell::new(chrrom_buf)));
+                pattern_buf_1k.push(Rc::new(RefCell::new(chrrom_buf)));
             }
 
-            Ok(pattern_buff1k)
+            Ok(pattern_buf_1k)
         }
 
-        pub fn load_rom(&mut self, file_name: &String) -> Result<(), Error> {
+        pub fn load(
+            &mut self,
+            file_name: &String,
+        ) -> Result<(Vec<Rc<RefCell<Vec<u8>>>>, Vec<Rc<RefCell<Vec<u8>>>>), Error> {
             let mut rom_file = self.rom_head.read_head(file_name)?;
             let head_id_str = std::str::from_utf8(&self.rom_head.id[..]).unwrap();
             if head_id_str != "NES\u{1a}" {
                 println!("Not support ROM type, {:?}", self.rom_head.id);
             }
 
-            let prgrom_buf = Self::read_prgrom(
+            let prg_buf_8k = Self::read_prgrom(
                 &mut rom_file,
                 self.rom_head.prgrom_size_16k,
                 self.rom_head.flag6.trainer_flag(),
             )?;
 
-            // println!("flag6,{:#x?}", head.flag6.map_lid());
-            // println!("flag7,{:#x?}", head.flag7.map_hid());
-            // println!("{:#x?}", head);
-
+            let mut pattern_buf_1k = Vec::new();
             if self.rom_head.chrrom_size_8k == 0 {
                 // 允许没有 CHR-ROM(使用 CHR-RAM 代替)
                 for _ in 0..8 {
                     let mut chrrom_buf = Vec::new();
                     chrrom_buf.resize(1024, 0);
-                    self.pattern_buff1k.push(Rc::new(RefCell::new(chrrom_buf)));
+                    pattern_buf_1k.push(Rc::new(RefCell::new(chrrom_buf)));
                 }
             } else {
-                self.pattern_buff1k =
-                    Self::read_chrrom(&mut rom_file, self.rom_head.chrrom_size_8k)?;
+                pattern_buf_1k = Self::read_chrrom(&mut rom_file, self.rom_head.chrrom_size_8k)?;
             }
-            let v = prgrom_buf.into_boxed_slice();
-            self.prg_buf = Some(Box::leak(v));
 
-            Ok(())
+            Ok((prg_buf_8k, pattern_buf_1k))
         }
     }
 }

@@ -1,9 +1,8 @@
 #![allow(dead_code)]
 
 pub mod ppu {
-    use crate::common::{Bus, Irq};
+    use crate::common::{Bus, Irq, Remap};
     use std::cell::RefCell;
-    use std::default;
     use std::rc::Rc;
 
     /*
@@ -19,35 +18,41 @@ pub mod ppu {
     $3F20-$3FFF 	$00E0 	$3F00-$3F1F 镜像
      */
     pub struct MemMap {
+        pub bank: [Rc<RefCell<Vec<u8>>>; 16],
         pub palette_indx_tbl: [u8; 0x20],
         pub pseudo_cache: u8,
         pub oam: [u8; 0x100],
         pub oam2: [Sprite; 8],
-        pub bus_to_mapper: *mut dyn Bus,
     }
 
     impl Bus for MemMap {
         fn read(&mut self, addr: u16) -> u8 {
-            let addr_map = addr & 0x3fff;
-
-            if addr_map < 0x3f00 {
+            if addr < 0x3f00 {
+                let i: usize = (addr >> 10).into();
+                let j: usize = (addr & 0x3ff).into();
                 let val = self.pseudo_cache;
-                self.pseudo_cache = unsafe { (*self.bus_to_mapper).read(addr) };
+                let bank = self.bank[i].clone();
+
+                self.pseudo_cache = bank.borrow()[j];
                 val
-            } else {
-                let palet_addr: usize = (addr_map & 0x1f).into();
+            } else if addr <= 0x3fff {
+                let palet_addr: usize = (addr & 0x1f).into();
                 self.pseudo_cache = self.palette_indx_tbl[palet_addr];
                 self.palette_indx_tbl[palet_addr]
+            } else {
+                panic!("Out of memory range!");
             }
         }
 
         fn write(&mut self, addr: u16, data: u8) {
-            let addr_map = addr & 0x3fff;
+            if addr < 0x3f00 {
+                let i: usize = (addr >> 10).into();
+                let j: usize = (addr & 0x3ff).into();
+                let bank = self.bank[i].clone();
 
-            if addr_map < 0x3f00 {
-                unsafe { (*self.bus_to_mapper).write(addr, data) };
-            } else {
-                let palet_addr: usize = (addr_map & 0x1f).into();
+                bank.borrow_mut()[j] = data;
+            } else if addr <= 0x3fff {
+                let palet_addr: usize = (addr & 0x1f).into();
                 if palet_addr & 0x3 != 0 {
                     self.palette_indx_tbl[palet_addr] = data;
                 } else {
@@ -55,18 +60,26 @@ pub mod ppu {
                     self.palette_indx_tbl[palet_addr] = data;
                     self.palette_indx_tbl[palet_addr ^ 0x10] = data;
                 }
+            } else {
+                panic!("Out of memory range!");
             }
         }
     }
 
+    impl Remap<'_, [Rc<RefCell<Vec<u8>>>; 16]> for MemMap {
+        fn get_remap_mem(&mut self) -> &mut [Rc<RefCell<Vec<u8>>>; 16] {
+            &mut self.bank
+        }
+    }
+
     impl<'a> MemMap {
-        pub fn new(mapper: *mut dyn Bus) -> Self {
+        pub fn new() -> Self {
             MemMap {
+                bank: Default::default(),
                 palette_indx_tbl: [0; 0x20],
                 pseudo_cache: 0,
                 oam: [0; 0x100],
                 oam2: Default::default(),
-                bus_to_mapper: mapper,
             }
         }
 
@@ -74,7 +87,10 @@ pub mod ppu {
             let addr_map = addr & 0x3fff;
 
             if addr_map < 0x3f00 {
-                let val = unsafe { (*self.bus_to_mapper).read(addr) };
+                let i: usize = (addr_map >> 10).into();
+                let j: usize = (addr_map & 0x3ff).into();
+                let bank = self.bank[i].clone();
+                let val = bank.borrow()[j];
                 val
             } else {
                 let palet_addr: usize = (addr_map & 0x1f).into();
@@ -395,10 +411,10 @@ pub mod ppu {
     }
 
     impl Ppu {
-        pub fn new(irq: *mut dyn Irq, mapper: *mut dyn Bus) -> Ppu {
+        pub fn new(irq: *mut dyn Irq) -> Ppu {
             Ppu {
                 reg: self::Register::new(),
-                mem: self::MemMap::new(mapper),
+                mem: self::MemMap::new(),
                 irq,
             }
         }

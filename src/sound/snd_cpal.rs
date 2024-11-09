@@ -4,7 +4,7 @@ pub mod snd_cpal {
     use blip_buf::BlipBuf;
     use cpal::{
         traits::{DeviceTrait, HostTrait, StreamTrait},
-        Sample, SampleFormat, SupportedStreamConfig,
+        Sample, SampleFormat,
     };
 
     use crate::sound::snd_base::{Snd, SndFunc};

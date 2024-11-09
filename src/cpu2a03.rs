@@ -21,10 +21,11 @@ pub mod cycle {
 }
 
 pub mod memory {
-    use crate::common::{Bus, Irq};
-    use crate::cpu2a03::apu;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::common::{Bus, Remap};
     use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
-    use crate::ppu2c02::ppu;
 
     /*
     address         size 	  describe
@@ -47,11 +48,12 @@ pub mod memory {
     pub struct MemMap {
         pub ram: [u8; 0x800],
         pub sram: [u8; 0x2000], // save RAM
-        pub prg_rom: [&'static [u8]; 4],
+        pub prg_rom: [Rc<RefCell<Vec<u8>>>; 4],
         pub key: [[u8; 8]; 2],
         pub key_indx: [usize; 2],
         pub bus_to_apu: *mut dyn Bus,
         pub bus_to_ppu: *mut dyn Bus,
+        pub bus_to_mapper: *mut dyn Bus,
     }
 
     impl Bus for MemMap {
@@ -59,41 +61,41 @@ pub mod memory {
             let i: usize = addr.into();
             let j: usize = i >> 13;
 
-            if addr & 0x8000 == 0x8000 {
-                // 高一位为 1, [$8000, $ffff) 程序 PRG-ROM 区
-                self.prg_rom[j & 3][i & 0x1fff]
-            } else {
-                match j {
-                    // 高三位为 0: [$0000, $1fff): 系统主内存，4 次镜像
-                    0 => self.ram[i & 0x7ff],
-                    // 高三位为 1, [$2000, $3fff): PPU 寄存器，8 字节步进镜像
-                    1 => self.ppu_read(addr),
-                    // 高三位为 2, [$4000, $5fff): pAPU 寄存器 扩展 ROM 区
-                    2 => {
-                        if addr == 0x4016 {
-                            let val = self.key[0][self.key_indx[0]];
-                            self.key_indx[0] += 1;
-                            if self.key_indx[0] > 7 {
-                                self.key_indx[0] = 0;
-                            }
-                            val
-                        } else if addr == 0x4017 {
-                            let val = self.key[1][self.key_indx[1]];
-                            self.key_indx[1] += 1;
-                            if self.key_indx[1] > 7 {
-                                self.key_indx[1] = 0;
-                            }
-                            val
-                        } else if addr == 0x4015 {
-                            self.apu_read(addr)
-                        } else {
-                            0
+            match j {
+                // 高三位为 0: [$0000, $1fff): 系统主内存，4 次镜像
+                0 => self.ram[i & 0x7ff],
+                // 高三位为 1, [$2000, $3fff): PPU 寄存器，8 字节步进镜像
+                1 => self.ppu_read(addr),
+                // 高三位为 2, [$4000, $5fff): pAPU 寄存器 扩展 ROM 区
+                2 => {
+                    if addr == 0x4016 {
+                        let val = self.key[0][self.key_indx[0]];
+                        self.key_indx[0] += 1;
+                        if self.key_indx[0] > 7 {
+                            self.key_indx[0] = 0;
                         }
+                        val
+                    } else if addr == 0x4017 {
+                        let val = self.key[1][self.key_indx[1]];
+                        self.key_indx[1] += 1;
+                        if self.key_indx[1] > 7 {
+                            self.key_indx[1] = 0;
+                        }
+                        val
+                    } else if addr == 0x4015 {
+                        self.apu_read(addr)
+                    } else {
+                        0
                     }
-                    // 高三位为 3, [$6000, $7fff): 存档 SRAM 区
-                    3 => self.sram[i & 0x1fff],
-                    _ => unreachable!("Out of memory range!"),
                 }
+                // 高三位为 3, [$6000, $7fff): 存档 SRAM 区
+                3 => self.sram[i & 0x1fff],
+                // [$8000, $ffff) 程序 PRG-ROM 区
+                4 | 5 | 6 | 7 => {
+                    let v = self.prg_rom[j & 3].clone().borrow()[i & 0x1fff];
+                    v
+                }
+                _ => unreachable!("Out of memory range!"),
             }
         }
 
@@ -105,13 +107,17 @@ pub mod memory {
             let dma_write = |addr_dma: u16| {
                 let offset: usize = (addr_dma & 0x1f00).into();
                 let base = addr_dma >> 13;
+                let prg_rom;
                 let src = match base {
                     0 => {
                         let mirror = offset & 0x7ff;
                         &self.ram[mirror..mirror + 256]
                     }
                     3 => &self.sram[offset..offset + 256],
-                    4 | 5 | 6 | 7 => &self.prg_rom[base as usize - 4][offset..256],
+                    4 | 5 | 6 | 7 => {
+                        prg_rom = self.prg_rom[(base - 4) as usize].clone();
+                        &prg_rom.borrow_mut()[offset..256]
+                    }
                     1 | 2 => {
                         unimplemented!("Can't be operating by DMA.");
                     }
@@ -150,25 +156,33 @@ pub mod memory {
                     self.sram[i & 0x1fff] = val;
                 }
                 4 | 5 | 6 | 7 => {
-                    unimplemented!("Rom can't be written.");
+                    self.mapper_write(addr, val);
                 }
                 _ => unreachable!("Out of memory range!"),
             }
         }
 
         fn push(&mut self, sp_piont: &mut u8, data: u8) {
+            println!("push sp_piont:{:x}",sp_piont);
             self.ram[0x100 + *sp_piont as usize] = data;
             *sp_piont = (*sp_piont).wrapping_sub(1);
         }
 
         fn pop(&self, sp_piont: &mut u8) -> u8 {
             *sp_piont = (*sp_piont).wrapping_add(1);
+            println!("pop sp_piont:{:x}",sp_piont);
             self.ram[0x100 + *sp_piont as usize]
         }
     }
 
+    impl Remap<'_, [Rc<RefCell<Vec<u8>>>; 4]> for MemMap {
+        fn get_remap_mem(&mut self) -> &mut [Rc<RefCell<Vec<u8>>>; 4] {
+            &mut self.prg_rom
+        }
+    }
+
     impl MemMap {
-        pub fn new(apu: *mut dyn Bus, ppu: *mut dyn Bus) -> MemMap {
+        pub fn new(apu: *mut dyn Bus, ppu: *mut dyn Bus, mapper: *mut dyn Bus) -> MemMap {
             MemMap {
                 ram: [0; 0x800],
                 key: [[0; 8]; 2],
@@ -177,13 +191,13 @@ pub mod memory {
                 prg_rom: Default::default(),
                 bus_to_apu: apu,
                 bus_to_ppu: ppu,
+                bus_to_mapper: mapper,
             }
         }
 
         fn ppu_read(&self, addr: u16) -> u8 {
             unsafe { (*self.bus_to_ppu).read(addr) }
         }
-
         fn apu_read(&self, addr: u16) -> u8 {
             unsafe { (*self.bus_to_apu).read(addr) }
         }
@@ -198,6 +212,9 @@ pub mod memory {
         }
         fn ppu_write(&mut self, addr: u16, val: u8) {
             unsafe { (*self.bus_to_ppu).write(addr, val) };
+        }
+        fn mapper_write(&mut self, addr: u16, val: u8) {
+            unsafe { (*self.bus_to_mapper).write(addr, val) };
         }
     }
 }
@@ -439,7 +456,7 @@ pub mod cpu {
             cpu_cycles_add(instru_addring.instru_base_cycle as u16);
 
             let op_addr = instru_addring.addring_mode.addressing(self, mem);
-            // print!(
+            // println!(
             //     "asm instruction {}, operation addr {:#x}, ",
             //     instru_addring.instru_name, op_addr
             // );
@@ -703,6 +720,7 @@ pub mod cpu {
                 Instruction::LDA => {
                     // LDA--由存储器取数送入累加器 A    M -> A
                     cpu_reg.a = mem.read(addr);
+                    println!("!!!!!LDA addr:{:x}, A:{:x}!!!!!",addr,cpu_reg.a);
                     cpu_reg.p.check_set_n(cpu_reg.a);
                     cpu_reg.p.check_set_z(cpu_reg.a);
                 }
@@ -1555,17 +1573,12 @@ pub mod cpu {
 }
 
 pub mod apu {
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use std::usize;
 
     use bitfield::{Bit, BitMut};
     use blip_buf::BlipBuf;
 
     use crate::common::{Bus, Irq};
-    use crate::cpu2a03::cpu;
-    use crate::cpu2a03::cycle::{cpu_cycles_add, get_cpu_cycles};
-    use crate::cpu2a03::memory::MemMap;
 
     /* DDLC VVVV
      Duty (D),

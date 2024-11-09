@@ -64,6 +64,10 @@ pub trait Bus {
     }
 }
 
+pub trait Remap<'a, T> {
+    fn get_remap_mem(&'a mut self) -> &'a mut T;
+}
+
 pub trait Irq {
     fn nmi_handler(&mut self) {}
     fn irq_handler(&mut self) {}

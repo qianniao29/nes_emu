@@ -1,15 +1,9 @@
 pub mod disp_sdl2 {
     //sdl
     use crate::display::disp::{Display, DisplayFunc};
-    use sdl2::event::Event;
-    use sdl2::keyboard::Keycode;
     use sdl2::pixels::{Color, PixelFormatEnum};
-    use sdl2::rect::{Point, Rect};
+    use sdl2::rect::Rect;
     use sdl2::render::{Canvas, Texture};
-
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    use std::time::Duration;
 
     pub struct DispSDL2 {
         pub sdl_context: sdl2::Sdl,

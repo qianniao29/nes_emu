@@ -14,35 +14,25 @@ mod rom_fs;
 mod sound;
 
 use std::{
-    cell::RefCell,
     env,
     ptr::addr_of_mut,
-    rc::Rc,
     time::{Duration, Instant},
 };
 
-use common::{error, Bus, Irq};
+use common::{Bus, Irq};
 use cpu2a03::{apu, cpu, cycle::cpu_cycles_reset, memory};
 use display::disp::{self, DisplayFunc};
 use display::display_sdl2::disp_sdl2;
 use input::input::InputFunc;
 use input::input_sdl2::input_sdl2;
-use mapper::{
-    mapper::{Mapper, MapperFunc, MapperX},
-    mapper_mmc1::mapper_mmc1::MapperMmc1,
-    mapper_nrom::mapper_nrom::MapperNrom,
-};
+use mapper::mapper::MapperX;
 use ppu2c02::ppu;
-use rom_fs::rom::{self, Rom, RomHead};
-use sound::{
-    snd_base::{self, SndFunc},
-    snd_cpal::snd_cpal,
-};
+use rom_fs::rom::Rom;
+use sound::snd_base::{self, SndFunc};
 
-struct DummyBus;
+struct DummyBus {}
 impl Bus for DummyBus {}
 impl Irq for DummyBus {}
-
 static mut DUMMY: DummyBus = DummyBus {};
 
 struct Soc {
@@ -51,42 +41,48 @@ struct Soc {
     pub apu: apu::Apu,
     pub mem: memory::MemMap,
     pub rom: Rom,
-    pub mapper: Mapper,
+    pub mapper: MapperX,
 }
 
 impl Soc {
     pub fn new(sample_rate: u32, rom_file_name: &String) -> Self {
         let mut rom = Rom::new();
-        rom.load_rom(rom_file_name)
-            .expect("Problem opening the file");
-        // println!("head:{:#?}", self.rom.rom_head);
+        let (prg_buf_8k, pattern_buf_1k) =
+            rom.load(rom_file_name).expect("Problem opening the file");
+        // println!("head:{:#?}", rom.rom_head);
         assert_eq!(
             rom.rom_head.timing,
             disp::TV_SYSTEM_NTSC,
             "Just support NTSC system!!!"
         );
 
-        let mapper = match rom.rom_head.flag6.map_lid() | (rom.rom_head.flag7.map_hid() << 4) {
-            0 => Mapper::new(MapperX::Mapper0(MapperNrom::new())),
-            1 => Mapper::new(MapperX::Mapper1(MapperMmc1::new())),
-            _ => unimplemented!("Unsupported mapper."),
-        };
+        let dummy = unsafe { addr_of_mut!(DUMMY) };
+        let cpu = cpu::Core::new(dummy);
+        let mut ppu = ppu::Ppu::new(dummy);
+        let apu = apu::Apu::new(
+            disp::NTSC.cpu_clock_hz,
+            sample_rate,
+            disp::TV_SYSTEM_NTSC,
+            dummy,
+            dummy,
+        );
+        let mut mem = memory::MemMap::new(dummy, dummy, dummy);
+        let mapper = MapperX::new(
+            rom.rom_head.flag6.map_lid() | (rom.rom_head.flag7.map_hid() << 4),
+            rom.rom_head.flag6.four_screen(),
+            rom.rom_head.flag6.mirror_flag(),
+            rom.rom_head.prgrom_size_16k,
+            &mut mem,
+            &mut ppu.mem,
+            pattern_buf_1k,
+            prg_buf_8k,
+        );
 
         Self {
-            cpu: cpu::Core::new(unsafe { addr_of_mut!(DUMMY) }),
-            ppu: ppu::Ppu::new(unsafe { addr_of_mut!(DUMMY) }, unsafe {
-                addr_of_mut!(DUMMY)
-            }),
-            apu: apu::Apu::new(
-                disp::NTSC.cpu_clock_hz,
-                sample_rate,
-                disp::TV_SYSTEM_NTSC,
-                unsafe { addr_of_mut!(DUMMY) },
-                unsafe { addr_of_mut!(DUMMY) },
-            ),
-            mem: memory::MemMap::new(unsafe { addr_of_mut!(DUMMY) }, unsafe {
-                addr_of_mut!(DUMMY)
-            }),
+            cpu,
+            ppu,
+            apu,
+            mem,
             rom,
             mapper,
         }
@@ -94,27 +90,16 @@ impl Soc {
 
     pub fn init(&mut self) {
         /*----------------------------------Mapper init-------------------------------------*/
-        self.mapper.mapping_name_table(
-            self.rom.rom_head.flag6.four_screen(),
-            self.rom.rom_head.flag6.mirror_flag(),
-            &self.rom.pattern_buff1k,
-        );
+        let mapper_base = self.mapper.mapper_base();
+        mapper_base.remap_cpu_mem = &mut self.mem;
+        mapper_base.remap_ppu_mem = &mut self.ppu.mem;
+        self.mapper.reset();
         /*-------------------------------------^---------------------------------------------*/
 
         /*------------------------------CPU memory init--------------------------------------*/
-        let mut offset = 0;
-        if self.rom.rom_head.prgrom_size_16k > 1 {
-            offset = 0x4000;
-        }
-        let prg_buf = self.rom.prg_buf.expect("load_rom error!");
-        self.mem.prg_rom = [
-            &prg_buf[0x0..0x2000],
-            &prg_buf[0x2000..0x4000],
-            &prg_buf[offset + 0x00..offset + 0x2000],
-            &prg_buf[offset + 0x2000..offset + 0x4000],
-        ];
         self.mem.bus_to_apu = &mut self.apu;
         self.mem.bus_to_ppu = &mut self.ppu;
+        self.mem.bus_to_mapper = self.mapper.get_bus();
         /*-------------------------------------^----------------------------------------------*/
 
         /*------------------------------CPU Register init-------------------------------------*/
@@ -124,12 +109,6 @@ impl Soc {
 
         /*--------------------------------PPU init--------------------------------------------*/
         self.ppu.irq = &mut self.cpu;
-        self.ppu.mem.bus_to_mapper = &mut self.mapper;
-        // self.ppu.mem.mapping_name_table(
-        //         self.rom.rom_head.flag6.four_screen(),
-        //         self.rom.rom_head.flag6.mirror_flag(),
-        //         &self.rom.pattern_buff1k,
-        //     );
         /*-----------------------------------^------------------------------------------------*/
 
         /*--------------------------------APU init--------------------------------------------*/
@@ -341,13 +320,5 @@ fn main() {
         // );
         std::thread::sleep(sleep_usec);
         /*----------------------------------^------------------------------------------*/
-    }
-
-    // should manual drop when emulator as a mod
-    if let Some(prg_buf_ref) = soc.rom.prg_buf {
-        // 重新创建一个 Box 来拥有 prg_buf_ref 的数据
-        let reclaimed_box = unsafe { Box::from_raw(prg_buf_ref as *const [u8] as *mut [u8]) };
-        // 显式释放 reclaimed_box
-        std::mem::drop(reclaimed_box);
     }
 }
